@@ -6,7 +6,8 @@
 //! - [`terrain`]: heightfield, cliff levels, texture weights, pathing.
 //! - [`objects`]: placed units, doodads and points.
 //! - [`regions`]: regions and cameras.
-//! - [`triggers`]: trigger library model; [`galaxy`] turns it into MapScript.galaxy.
+//! - [`triggers`]: trigger library model; [`galaxy`] turns it into MapScript.galaxy
+//!   and lints Galaxy; [`trigger_lib`] describes the natives the editor offers.
 //! - [`catalog`]: generic GameData catalog entries (units, abilities, weapons...).
 //! - [`catalog_schema`]: curated field types and descriptions for common classes.
 //! - [`strings`]: localized text keyed by locale.
@@ -28,6 +29,7 @@ pub mod ops;
 pub mod regions;
 pub mod strings;
 pub mod terrain;
+pub mod trigger_lib;
 pub mod triggers;
 pub mod validate;
 
