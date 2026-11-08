@@ -8,7 +8,10 @@ use strata_casc::{block_on, DirSource, Storage};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let root = args.first().cloned().unwrap_or_else(|| "C:/Program Files (x86)/StarCraft II".into());
+    let root = args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "C:/Program Files (x86)/StarCraft II".into());
     let t = Instant::now();
     let storage = match block_on(Storage::open(DirSource::new(&root))) {
         Ok(s) => s,
@@ -37,7 +40,10 @@ fn main() {
         return;
     }
     let filter = args.get(1).map(|s| s.to_ascii_lowercase()).unwrap_or_default();
-    let out = args.iter().position(|a| a == "--out").map(|i| std::path::PathBuf::from(&args[i + 1]));
+    let out = args
+        .iter()
+        .position(|a| a == "--out")
+        .map(|i| std::path::PathBuf::from(&args[i + 1]));
     for f in storage.files() {
         if f.path.to_ascii_lowercase().contains(&filter) {
             println!("{}\t{}", f.size, f.path);

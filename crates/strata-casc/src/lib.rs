@@ -58,7 +58,8 @@ impl Key {
         }
         let mut k = [0u8; 16];
         for (i, b) in k.iter_mut().enumerate() {
-            *b = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).map_err(|_| CascError::Format(format!("bad key {s:?}")))?;
+            *b = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16)
+                .map_err(|_| CascError::Format(format!("bad key {s:?}")))?;
         }
         Ok(Key(k))
     }
@@ -132,7 +133,10 @@ impl DirSource {
     fn list_sync(&self, dir: &str) -> Result<Vec<String>, CascError> {
         let full = self.root.join(dir);
         let rd = std::fs::read_dir(&full).map_err(|e| CascError::Io(format!("{}: {e}", full.display())))?;
-        Ok(rd.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into_owned()).collect())
+        Ok(rd
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect())
     }
 }
 
@@ -149,7 +153,9 @@ impl Source for DirSource {
 
 /// Normalizes a storage path for lookup: lowercase, `/` separators.
 pub fn normalize_path(path: &str) -> String {
-    path.trim_start_matches(['/', '\\']).replace('\\', "/").to_ascii_lowercase()
+    path.trim_start_matches(['/', '\\'])
+        .replace('\\', "/")
+        .to_ascii_lowercase()
 }
 
 /// An opened CASC storage: the file list plus what is needed to read files.
@@ -190,9 +196,12 @@ impl<S: Source> Storage<S> {
                 }
             }
         }
-        let data_dir = data_dir.ok_or_else(|| CascError::NotAnInstall("no SC2Data/data folder with .idx files".into()))?;
+        let data_dir =
+            data_dir.ok_or_else(|| CascError::NotAnInstall("no SC2Data/data folder with .idx files".into()))?;
 
-        let cfg_bytes = source.read(&config::config_path(&data_dir, &build.build_key), 0, None).await?;
+        let cfg_bytes = source
+            .read(&config::config_path(&data_dir, &build.build_key), 0, None)
+            .await?;
         let cfg = BuildConfig::parse(&String::from_utf8_lossy(&cfg_bytes))?;
 
         let mut index = index::LocalIndex::default();
@@ -269,7 +278,10 @@ impl<S: Source> Storage<S> {
             return Err(CascError::Format("index entry too small".into()));
         }
         let path = format!("{}/data/data.{:03}", self.data_dir, loc.archive);
-        let raw = self.source.read(&path, loc.offset as u64, Some(loc.size as u64)).await?;
+        let raw = self
+            .source
+            .read(&path, loc.offset as u64, Some(loc.size as u64))
+            .await?;
         blte::decode(&raw[30..])
     }
 

@@ -123,9 +123,17 @@ counter-clockwise from east.
 | `set_custom_script` | Custom Galaxy code |
 | `set_string` / `get_strings` | Localized text |
 | `set_data_field` / `list_data` | GameData catalog fields (e.g. CUnit Marine LifeMax) |
+| `list_base_units` | Real StarCraft II units (id, name, race, size) from your install |
+| `search_base_data` / `get_base_data` | Base-game catalogs: find ids, read inherited fields (Marine LifeMax 45) |
 | `set_map_info` / `set_player` | Map properties and player slots |
 | `validate_map` | Problems list |
 | `undo` / `redo` / `history` | History on the active target |
+
+The base-game tools read your own StarCraft II install (`STRATA_SC2_DIR`, or
+the default Program Files folder): on start the server indexes Core, Liberty,
+Swarm, Void and the multiplayer mods in the background and caches the index
+next to the token file. `editor_status` reports `base_data`. No Blizzard data
+ships with Strata.
 
 Tool failures (bad arguments, out-of-range values, missing names) come back
 as tool results with `isError: true` and a message that says what was wrong

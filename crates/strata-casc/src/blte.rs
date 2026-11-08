@@ -66,7 +66,12 @@ fn decode_frame(frame: &[u8], content_size: Option<usize>, out: &mut Vec<u8>) ->
         }
         b'F' => decode_into(body, out)?,
         b'E' => return Err(CascError::Encrypted),
-        other => return Err(CascError::Format(format!("unsupported BLTE frame mode {:?}", other as char))),
+        other => {
+            return Err(CascError::Format(format!(
+                "unsupported BLTE frame mode {:?}",
+                other as char
+            )))
+        }
     }
     if let Some(expected) = content_size {
         if out.len() - start != expected {

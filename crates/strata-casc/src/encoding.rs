@@ -47,11 +47,21 @@ impl Encoding {
                 k
             })
             .collect();
-        Ok(Encoding { data, page_size, pages_at, first_keys })
+        Ok(Encoding {
+            data,
+            page_size,
+            pages_at,
+            first_keys,
+        })
     }
 
     pub(crate) fn empty() -> Encoding {
-        Encoding { data: Vec::new(), page_size: 1, pages_at: 0, first_keys: Vec::new() }
+        Encoding {
+            data: Vec::new(),
+            page_size: 1,
+            pages_at: 0,
+            first_keys: Vec::new(),
+        }
     }
 
     pub fn page_count(&self) -> usize {
@@ -124,7 +134,11 @@ mod tests {
 
     #[test]
     fn finds_keys_in_page() {
-        let mut entries = [([3u8; 16], [30u8; 16], 300), ([1u8; 16], [10u8; 16], 100), ([2u8; 16], [20u8; 16], 200)];
+        let mut entries = [
+            ([3u8; 16], [30u8; 16], 300),
+            ([1u8; 16], [10u8; 16], 100),
+            ([2u8; 16], [20u8; 16], 200),
+        ];
         let enc = Encoding::parse(build_encoding(&mut entries)).unwrap();
         assert_eq!(enc.page_count(), 1);
         assert_eq!(enc.find(&Key([2u8; 16])), Some((Key([20u8; 16]), 200)));

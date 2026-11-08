@@ -17,11 +17,19 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::catalog::{CatalogEntry, CatalogKind, Catalog, FieldKey, ResolvedField, XmlNode};
+use crate::catalog::{Catalog, CatalogEntry, CatalogKind, FieldKey, ResolvedField, XmlNode};
 use crate::known::UnitGroup;
 
 /// The dependency chain of a standard melee map, in load order.
-pub const MELEE_MODS: &[&str] = &["Core", "Liberty", "Swarm", "Void", "LibertyMulti", "SwarmMulti", "VoidMulti"];
+pub const MELEE_MODS: &[&str] = &[
+    "Core",
+    "Liberty",
+    "Swarm",
+    "Void",
+    "LibertyMulti",
+    "SwarmMulti",
+    "VoidMulti",
+];
 
 /// GameStrings prefixes kept for display names.
 const NAME_PREFIXES: &[&str] = &[
@@ -104,7 +112,10 @@ fn is_default(e: &CatalogEntry) -> bool {
 
 fn kind_of_file(file: &str) -> CatalogKind {
     let stem = file.rsplit('/').next().unwrap_or(file);
-    let stem = stem.strip_suffix(".xml").or_else(|| stem.strip_suffix(".XML")).unwrap_or(stem);
+    let stem = stem
+        .strip_suffix(".xml")
+        .or_else(|| stem.strip_suffix(".XML"))
+        .unwrap_or(stem);
     CatalogKind::ALL
         .into_iter()
         .find(|k| *k != CatalogKind::Other && k.file().eq_ignore_ascii_case(stem))
@@ -115,7 +126,10 @@ impl BaseCatalog {
     /// Starts building a catalog for game `version`.
     pub fn builder(version: impl Into<String>) -> BaseBuilder {
         BaseBuilder {
-            cat: BaseCatalog { version: version.into(), ..Default::default() },
+            cat: BaseCatalog {
+                version: version.into(),
+                ..Default::default()
+            },
             by_key: HashMap::new(),
         }
     }
@@ -161,7 +175,11 @@ impl BaseCatalog {
 
     /// The mod that first defined entry `i`.
     pub fn origin_of(&self, i: usize) -> &str {
-        self.origin.get(i).and_then(|&m| self.mods.get(m as usize)).map(String::as_str).unwrap_or("")
+        self.origin
+            .get(i)
+            .and_then(|&m| self.mods.get(m as usize))
+            .map(String::as_str)
+            .unwrap_or("")
     }
 
     /// The parent of entry `i`: its `parent`, or its class default.
@@ -190,7 +208,9 @@ impl BaseCatalog {
 
     /// The element `key` as seen from entry `i`, with the entry that sets it.
     pub fn resolve(&self, i: usize, key: &FieldKey) -> Option<(&XmlNode, usize)> {
-        self.chain(i).into_iter().find_map(|j| self.entries[j].get(key).map(|n| (n, j)))
+        self.chain(i)
+            .into_iter()
+            .find_map(|j| self.entries[j].get(key).map(|n| (n, j)))
     }
 
     /// The scalar `value` of `key` as seen from entry `i`.
@@ -231,7 +251,9 @@ impl BaseCatalog {
         let top = cat.parent_chain(index).last().copied().unwrap_or(index);
         let te = &cat.entries[top];
         if te.parent().is_none() {
-            return self.find(kind, te.id()).or_else(|| self.defaults.get(te.class()).copied());
+            return self
+                .find(kind, te.id())
+                .or_else(|| self.defaults.get(te.class()).copied());
         }
         None
     }
@@ -240,11 +262,18 @@ impl BaseCatalog {
     /// map entry `index` inherits from the base game. Returns, per appended
     /// field, the base entry that sets it (same order).
     pub fn extend_resolved(&self, cat: &Catalog, index: usize, fields: &mut Vec<ResolvedField>) -> Vec<usize> {
-        let Some(base) = self.underlying(cat, index) else { return Vec::new() };
+        let Some(base) = self.underlying(cat, index) else {
+            return Vec::new();
+        };
         let mut sources = Vec::new();
         for f in self.fields(base) {
             if !fields.iter().any(|x| x.key == f.key) {
-                fields.push(ResolvedField { key: f.key, node: f.node.clone(), source: index, inherited: true });
+                fields.push(ResolvedField {
+                    key: f.key,
+                    node: f.node.clone(),
+                    source: index,
+                    inherited: true,
+                });
                 sources.push(f.source);
             }
         }
@@ -254,7 +283,8 @@ impl BaseCatalog {
     /// The scalar value map entry `index` inherits from the base game.
     pub fn inherited_value(&self, cat: &Catalog, index: usize, key: &FieldKey) -> Option<(&str, usize)> {
         let base = self.underlying(cat, index)?;
-        self.resolve(base, key).and_then(|(n, j)| n.attr("value").map(|v| (v, j)))
+        self.resolve(base, key)
+            .and_then(|(n, j)| n.attr("value").map(|v| (v, j)))
     }
 
     /// A localized string by key.
@@ -307,7 +337,15 @@ impl BaseCatalog {
     }
 
     fn compute_units(&self) -> Vec<BaseUnit> {
-        const PLACEABLE: &[&str] = &["Unit", "Structure", "Hero", "Resource", "Destructible", "Item", "Character"];
+        const PLACEABLE: &[&str] = &[
+            "Unit",
+            "Structure",
+            "Hero",
+            "Resource",
+            "Destructible",
+            "Item",
+            "Character",
+        ];
         let mut out = Vec::new();
         for (i, e) in self.entries.iter().enumerate() {
             if e.kind() != CatalogKind::Unit || e.class() != "CUnit" || is_default(e) || e.id().is_empty() {
@@ -341,7 +379,9 @@ impl BaseCatalog {
                 structure: object_type == "Structure"
                     || get(&FieldKey::indexed("Attributes", "Structure")) == Some("1"),
                 air: get(&FieldKey::indexed("PlaneArray", "Air")) == Some("1"),
-                radius: get(&FieldKey::new("Radius")).and_then(|r| r.parse().ok()).unwrap_or(0.5),
+                radius: get(&FieldKey::new("Radius"))
+                    .and_then(|r| r.parse().ok())
+                    .unwrap_or(0.5),
                 footprint: get(&FieldKey::new("Footprint")).map(str::to_owned),
                 object_type: object_type.to_owned(),
                 family: family.to_owned(),
@@ -368,7 +408,10 @@ impl BaseCatalog {
                 continue;
             }
             let id = e.id().to_lowercase();
-            let name = self.display_name(e.kind(), e.id()).map(str::to_lowercase).unwrap_or_default();
+            let name = self
+                .display_name(e.kind(), e.id())
+                .map(str::to_lowercase)
+                .unwrap_or_default();
             let rank = if q.is_empty() {
                 3
             } else if id == q || name == q {
@@ -382,7 +425,10 @@ impl BaseCatalog {
             };
             hits.push((rank, i));
         }
-        hits.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| self.entries[a.1].id().cmp(self.entries[b.1].id())));
+        hits.sort_by(|a, b| {
+            a.0.cmp(&b.0)
+                .then_with(|| self.entries[a.1].id().cmp(self.entries[b.1].id()))
+        });
         hits.into_iter().take(limit).map(|(_, i)| i).collect()
     }
 
@@ -453,13 +499,20 @@ impl BaseBuilder {
     fn add_entry(&mut self, kind: CatalogKind, node: XmlNode) {
         let id = node.attr("id").unwrap_or("").to_owned();
         // Class defaults are per class; named entries share one id space per kind.
-        let class_key = if id.is_empty() { node.name.clone() } else { String::new() };
+        let class_key = if id.is_empty() {
+            node.name.clone()
+        } else {
+            String::new()
+        };
         let key = (kind, id, class_key);
         match self.by_key.get(&key) {
             Some(&i) => merge(&mut self.cat.entries[i].node, &node),
             None => {
                 self.by_key.insert(key, self.cat.entries.len());
-                self.cat.entries.push(CatalogEntry { file: kind.file().to_owned(), node });
+                self.cat.entries.push(CatalogEntry {
+                    file: kind.file().to_owned(),
+                    node,
+                });
                 self.cat.origin.push(self.current_mod());
             }
         }
@@ -472,7 +525,9 @@ impl BaseBuilder {
             let line = line.trim_start_matches('\u{feff}');
             let Some((k, v)) = line.split_once('=') else { continue };
             if NAME_PREFIXES.iter().any(|p| k.starts_with(p)) {
-                self.cat.strings.insert(k.to_owned(), v.trim_end_matches('\r').to_owned());
+                self.cat
+                    .strings
+                    .insert(k.to_owned(), v.trim_end_matches('\r').to_owned());
             }
         }
     }
@@ -511,7 +566,9 @@ fn merge(base: &mut XmlNode, over: &XmlNode) {
                         .map(|(i, _)| i)
                 }),
             None => {
-                let same: Vec<usize> = (0..base.children.len()).filter(|&i| base.children[i].name == c.name).collect();
+                let same: Vec<usize> = (0..base.children.len())
+                    .filter(|&i| base.children[i].name == c.name)
+                    .collect();
                 let is_array = c.name.ends_with("Array") || same.len() > 1;
                 if is_array && !removed {
                     None
@@ -548,7 +605,8 @@ fn merge(base: &mut XmlNode, over: &XmlNode) {
 /// Paths a [`strata_casc::Storage`] must keep for [`load_from_casc`].
 pub fn casc_filter(path: &str) -> bool {
     path.starts_with("mods/")
-        && (path.contains(".sc2mod/base.sc2data/gamedata/") || path.ends_with("/enus.sc2data/localizeddata/gamestrings.txt"))
+        && (path.contains(".sc2mod/base.sc2data/gamedata/")
+            || path.ends_with("/enus.sc2data/localizeddata/gamestrings.txt"))
 }
 
 /// Builds the base catalog from an opened CASC storage. `progress` is told
@@ -597,8 +655,11 @@ pub async fn load_from_casc<S: strata_casc::Source>(
 /// (native only).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn load_install(root: &std::path::Path) -> Result<BaseCatalog, String> {
-    let storage = strata_casc::block_on(strata_casc::Storage::open_filtered(strata_casc::DirSource::new(root), casc_filter))
-        .map_err(|e| e.to_string())?;
+    let storage = strata_casc::block_on(strata_casc::Storage::open_filtered(
+        strata_casc::DirSource::new(root),
+        casc_filter,
+    ))
+    .map_err(|e| e.to_string())?;
     strata_casc::block_on(load_from_casc(&storage, MELEE_MODS, |_| {}))
 }
 
@@ -683,11 +744,16 @@ mod tests {
     fn sample() -> BaseCatalog {
         let mut b = BaseCatalog::builder("1.2.3");
         b.begin_mod("Core");
-        assert_eq!(b.add_catalog("mods/core.sc2mod/base.sc2data/gamedata/unitdata.xml", CORE.as_bytes()), Ok(2));
+        assert_eq!(
+            b.add_catalog("mods/core.sc2mod/base.sc2data/gamedata/unitdata.xml", CORE.as_bytes()),
+            Ok(2)
+        );
         assert_eq!(b.add_catalog("ignored/sounddata.xml", CORE.as_bytes()), Ok(0));
         b.begin_mod("Liberty");
         b.add_catalog("UnitData.xml", LIBERTY.as_bytes()).unwrap();
-        b.add_strings(b"\xef\xbb\xbfUnit/Name/Marine=Marine\r\nUnit/Name/Rocks=Destructible Rocks\nButton/Tooltip/X=skip\n");
+        b.add_strings(
+            b"\xef\xbb\xbfUnit/Name/Marine=Marine\r\nUnit/Name/Rocks=Destructible Rocks\nButton/Tooltip/X=skip\n",
+        );
         b.begin_mod("VoidMulti");
         b.add_catalog("unitdata.xml", MULTI.as_bytes()).unwrap();
         b.finish()
@@ -707,7 +773,9 @@ mod tests {
             .filter_map(|n| n.attr("Link"))
             .collect();
         assert_eq!(abils, ["stop", "AttackBetter", "Stimpack"]);
-        assert!(c.entries[m].get(&FieldKey::indexed("CostResource", "Minerals")).is_none());
+        assert!(c.entries[m]
+            .get(&FieldKey::indexed("CostResource", "Minerals"))
+            .is_none());
         assert_eq!(c.strings.len(), 2);
         assert_eq!(c.display_name(CatalogKind::Unit, "Rocks"), Some("Destructible Rocks"));
     }
@@ -731,9 +799,15 @@ mod tests {
         let ids: Vec<&str> = c.units().iter().map(|u| u.id.as_str()).collect();
         assert_eq!(ids, ["Marine", "Rocks"]);
         let marine = c.unit("Marine").unwrap();
-        assert_eq!((marine.race, marine.air, marine.structure), (UnitGroup::Terran, true, false));
+        assert_eq!(
+            (marine.race, marine.air, marine.structure),
+            (UnitGroup::Terran, true, false)
+        );
         let rocks = c.unit("Rocks").unwrap();
-        assert_eq!((rocks.race, rocks.structure, rocks.radius), (UnitGroup::Neutral, true, 2.0));
+        assert_eq!(
+            (rocks.race, rocks.structure, rocks.radius),
+            (UnitGroup::Neutral, true, 2.0)
+        );
         assert_eq!(rocks.name, "Destructible Rocks");
         assert_eq!(c.search("rock", Some(CatalogKind::Unit), 10), vec![rocks_index(&c)]);
     }

@@ -46,7 +46,12 @@ impl BitArray {
             acc += w.count_ones();
         }
         ranks.push(acc);
-        BitArray { words, total, valid, ranks }
+        BitArray {
+            words,
+            total,
+            valid,
+            ranks,
+        }
     }
 
     fn is_empty(&self) -> bool {
@@ -54,7 +59,9 @@ impl BitArray {
     }
 
     fn get(&self, i: u32) -> bool {
-        self.words.get((i >> 5) as usize).is_some_and(|w| w >> (i & 31) & 1 != 0)
+        self.words
+            .get((i >> 5) as usize)
+            .is_some_and(|w| w >> (i & 31) & 1 != 0)
     }
 
     /// Number of set bits before position `i`.
@@ -69,7 +76,9 @@ impl BitArray {
     /// Position of the `k`-th (0-based) set bit.
     fn select1(&self, k: u32) -> Option<u32> {
         // Last word whose prefix count is <= k.
-        let w = self.ranks[..self.words.len()].partition_point(|&r| r <= k).checked_sub(1)?;
+        let w = self.ranks[..self.words.len()]
+            .partition_point(|&r| r <= k)
+            .checked_sub(1)?;
         let within = k - self.ranks[w];
         let word = self.words[w];
         if within >= word.count_ones() {
@@ -183,7 +192,11 @@ impl<'a> Stream<'a> {
     }
 
     fn u32_array(&mut self) -> Result<Vec<u32>, CascError> {
-        Ok(self.array(4)?.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect())
+        Ok(self
+            .array(4)?
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+            .collect())
     }
 
     fn bit_array(&mut self) -> Result<BitArray, CascError> {
@@ -346,7 +359,10 @@ impl NameDb {
                     return Ok(());
                 }
                 // Parent in the LOUDS trie.
-                let pos = self.collision.select1(node).ok_or_else(|| CascError::Format("MNDX: bad parent link".into()))?;
+                let pos = self
+                    .collision
+                    .select1(node)
+                    .ok_or_else(|| CascError::Format("MNDX: bad parent link".into()))?;
                 node = pos.wrapping_sub(node).wrapping_sub(1);
             }
         }
@@ -361,9 +377,16 @@ impl NameDb {
             base: usize,
         }
         let children = |node: u32| -> Result<Frame, CascError> {
-            let zero = self.collision.select0(node).ok_or_else(|| CascError::Format("MNDX: bad child link".into()))?;
+            let zero = self
+                .collision
+                .select0(node)
+                .ok_or_else(|| CascError::Format("MNDX: bad child link".into()))?;
             let pos = zero + 1;
-            Ok(Frame { pos, child: pos - node - 1, base: 0 })
+            Ok(Frame {
+                pos,
+                child: pos - node - 1,
+                base: 0,
+            })
         };
         let mut path = Vec::with_capacity(256);
         if self.file_names.get(0) {
@@ -434,7 +457,10 @@ pub fn parse(data: &[u8]) -> Result<Vec<RootEntry>, CascError> {
     }
     let mut mars = Vec::new();
     for i in 0..mar_info_count {
-        let mut info = Stream { data, pos: mar_info_offset + i * mar_info_size };
+        let mut info = Stream {
+            data,
+            pos: mar_info_offset + i * mar_info_size,
+        };
         let _index = info.u32()?;
         let size = info.u32()? as usize;
         let _size_hi = info.u32()?;
@@ -446,7 +472,9 @@ pub fn parse(data: &[u8]) -> Result<Vec<RootEntry>, CascError> {
     if stripped_db.name_count() as usize != file_name_count {
         return Err(bad("name count mismatch"));
     }
-    let entries = data.get(ckey_offset..ckey_offset + ckey_count * 24).ok_or_else(truncated)?;
+    let entries = data
+        .get(ckey_offset..ckey_offset + ckey_count * 24)
+        .ok_or_else(truncated)?;
     let entry = |i: usize| {
         let e = &entries[i * 24..i * 24 + 24];
         let flags = u32::from_le_bytes(e[0..4].try_into().unwrap());
@@ -478,7 +506,9 @@ pub fn parse(data: &[u8]) -> Result<Vec<RootEntry>, CascError> {
 
     let mut out = Vec::with_capacity(ckey_count);
     stripped_db.for_each_name(|name, index| {
-        let Some(&start) = group_start.get(index as usize) else { return };
+        let Some(&start) = group_start.get(index as usize) else {
+            return;
+        };
         if index as usize >= file_name_count {
             return;
         }
@@ -486,7 +516,11 @@ pub fn parse(data: &[u8]) -> Result<Vec<RootEntry>, CascError> {
         for i in start..ckey_count {
             let (flags, ckey, size) = entry(i);
             if let Some(Some(pkg)) = packages.get((flags & 0x00FF_FFFF) as usize) {
-                out.push(RootEntry { path: format!("{pkg}/{name}"), ckey, size });
+                out.push(RootEntry {
+                    path: format!("{pkg}/{name}"),
+                    ckey,
+                    size,
+                });
             }
             if flags & 0x8000_0000 != 0 {
                 break;
@@ -535,7 +569,7 @@ mod tests {
         let mut words = vec![0u32; 8];
         for i in 0..20u64 {
             let bit = i * 12;
-            let v = (i * 37 % 4096) as u64;
+            let v = i * 37 % 4096;
             let w = (bit / 32) as usize;
             let packed = (v << (bit % 32)) as u128;
             words[w] |= packed as u32;
@@ -543,7 +577,11 @@ mod tests {
                 words[w + 1] |= (packed >> 32) as u32;
             }
         }
-        let arr = BitEntryArray { words, bits: 12, mask: 0xFFF };
+        let arr = BitEntryArray {
+            words,
+            bits: 12,
+            mask: 0xFFF,
+        };
         for i in 0..20u32 {
             assert_eq!(arr.get(i), i * 37 % 4096);
         }
@@ -564,11 +602,16 @@ mod tests {
             file_names,
             hi_bits_idx: bits(&[0, 0, 0, 0]),
             lo_bits: vec![0, b'a', b'c', b'b'],
-            hash: vec![HashEntry { node: u32::MAX, next: u32::MAX, fragment: 0 }],
+            hash: vec![HashEntry {
+                node: u32::MAX,
+                next: u32::MAX,
+                fragment: 0,
+            }],
             ..NameDb::default()
         };
         let mut names = Vec::new();
-        db.for_each_name(|n, i| names.push((String::from_utf8(n.to_vec()).unwrap(), i))).unwrap();
+        db.for_each_name(|n, i| names.push((String::from_utf8(n.to_vec()).unwrap(), i)))
+            .unwrap();
         assert_eq!(names, vec![("ab".to_string(), 1), ("c".to_string(), 0)]);
         // Parent links walk back up: b -> a.
         assert_eq!(db.collision.select1(3).unwrap() - 3 - 1, 1);

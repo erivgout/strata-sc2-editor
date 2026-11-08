@@ -3180,6 +3180,7 @@ dependencies = [
  "rfd",
  "serde",
  "serde_json",
+ "strata-casc",
  "strata-core",
  "strata-format",
  "tungstenite",

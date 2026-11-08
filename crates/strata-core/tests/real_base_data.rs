@@ -46,7 +46,10 @@ fn real_base_data() {
     assert_eq!(cat.field(CatalogKind::Unit, "Marine", "Race"), Some("Terr"));
     assert_eq!(cat.display_name(CatalogKind::Unit, "HellionTank"), Some("Hellbat"));
     let marine = cat.find(CatalogKind::Unit, "Marine").unwrap();
-    assert_eq!(cat.resolve_value(marine, &FieldKey::indexed("CostResource", "Minerals")), Some("50"));
+    assert_eq!(
+        cat.resolve_value(marine, &FieldKey::indexed("CostResource", "Minerals")),
+        Some("50")
+    );
     let cc = cat.unit("CommandCenter").expect("Command Center is placeable");
     assert!(cc.structure && cc.race == UnitGroup::Terran);
     assert_eq!(cc.footprint.as_deref(), Some("Footprint5x5Contour"));

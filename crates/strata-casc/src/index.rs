@@ -35,11 +35,14 @@ impl LocalIndex {
         let mut best: HashMap<u8, (u32, &String)> = HashMap::new();
         for name in names {
             let lower = name.to_ascii_lowercase();
-            let Some(stem) = lower.strip_suffix(".idx") else { continue };
+            let Some(stem) = lower.strip_suffix(".idx") else {
+                continue;
+            };
             if stem.len() != 10 || !stem.bytes().all(|b| b.is_ascii_hexdigit()) {
                 continue;
             }
-            let (Ok(bucket), Ok(version)) = (u8::from_str_radix(&stem[..2], 16), u32::from_str_radix(&stem[2..], 16)) else {
+            let (Ok(bucket), Ok(version)) = (u8::from_str_radix(&stem[..2], 16), u32::from_str_radix(&stem[2..], 16))
+            else {
                 continue;
             };
             if bucket > 0x0F {
@@ -65,7 +68,13 @@ impl LocalIndex {
         let h = &data[8..];
         let revision = u16::from_le_bytes([h[0], h[1]]);
         let (size_bytes, offset_bytes, key_bytes, segment_bits) = (h[4], h[5], h[6], h[7]);
-        if revision != 7 || size_bytes != 4 || offset_bytes != 5 || key_bytes != 9 || segment_bits == 0 || segment_bits > 39 {
+        if revision != 7
+            || size_bytes != 4
+            || offset_bytes != 5
+            || key_bytes != 9
+            || segment_bits == 0
+            || segment_bits > 39
+        {
             return Err(bad(&format!("unsupported layout (revision {revision})")));
         }
         let block = (8 + header_size + 0x0F) & !0x0F;
@@ -133,17 +142,30 @@ mod tests {
 
     #[test]
     fn newest_version_per_bucket() {
-        let names: Vec<String> = ["0000000016.idx", "0000000017.idx", "0100000003.IDX", "readme.txt", "1000000001.idx"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        assert_eq!(LocalIndex::select_files(&names), vec!["0000000017.idx", "0100000003.IDX"]);
+        let names: Vec<String> = [
+            "0000000016.idx",
+            "0000000017.idx",
+            "0100000003.IDX",
+            "readme.txt",
+            "1000000001.idx",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(
+            LocalIndex::select_files(&names),
+            vec!["0000000017.idx", "0100000003.IDX"]
+        );
     }
 
     #[test]
     fn parses_entries() {
         let key = [7u8; 16];
-        let loc = Location { archive: 25, offset: 0x1234_5678 & 0x3FFF_FFFF, size: 999 };
+        let loc = Location {
+            archive: 25,
+            offset: 0x1234_5678 & 0x3FFF_FFFF,
+            size: 999,
+        };
         let mut idx = LocalIndex::default();
         idx.add_file(&build_idx(3, &[(key, loc)])).unwrap();
         assert_eq!(idx.len(), 1);

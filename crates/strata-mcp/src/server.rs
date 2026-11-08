@@ -281,6 +281,7 @@ impl Strata {
                 "editor_state": live_state,
             },
             "http": self.live.http_url,
+            "base_data": crate::base::status_json(),
             "headless": {
                 "map_name": h.doc.info.name,
                 "path": h.path.as_ref().map(|p| p.display().to_string()),

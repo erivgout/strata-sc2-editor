@@ -32,7 +32,11 @@ impl BuildInfo {
             .find(|r| active.and_then(|a| r.get(a)).is_some_and(|v| v.trim() == "1"))
             .or_else(|| rows.first())
             .ok_or_else(|| CascError::Format(".build.info has no builds".into()))?;
-        let get = |c: Option<usize>| c.and_then(|c| row.get(c)).map(|s| s.trim().to_string()).unwrap_or_default();
+        let get = |c: Option<usize>| {
+            c.and_then(|c| row.get(c))
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default()
+        };
         Ok(BuildInfo {
             build_key: Key::from_hex(&get(Some(key_col)))?,
             version: get(col("version")),
@@ -84,7 +88,8 @@ pub fn config_path(data_dir: &str, key: &Key) -> String {
 mod tests {
     use super::*;
 
-    const BUILD_INFO: &str = "Branch!STRING:0|Active!DEC:1|Build Key!HEX:16|CDN Key!HEX:16|Version!STRING:0|Product!STRING:0\n\
+    const BUILD_INFO: &str =
+        "Branch!STRING:0|Active!DEC:1|Build Key!HEX:16|CDN Key!HEX:16|Version!STRING:0|Product!STRING:0\n\
         eu|0|00000000000000000000000000000000|11111111111111111111111111111111|1.0||\n\
         us|1|1d231af579faf03e61a364722a3b87b4|e4f2e2da310c08495f2701d401d14659|5.0.17.98310||\n";
 
@@ -105,6 +110,9 @@ mod tests {
         assert_eq!(cfg.root_ckey.to_hex(), "9c1f3d3d30ca252e33fc67ca05cbe1ea");
         assert_eq!(cfg.encoding_ekey.to_hex(), "58a909228b3339316bf5ecfd9a842852");
         assert_eq!(cfg.build_name, "B98310");
-        assert_eq!(config_path("SC2Data", &cfg.root_ckey), "SC2Data/config/9c/1f/9c1f3d3d30ca252e33fc67ca05cbe1ea");
+        assert_eq!(
+            config_path("SC2Data", &cfg.root_ckey),
+            "SC2Data/config/9c/1f/9c1f3d3d30ca252e33fc67ca05cbe1ea"
+        );
     }
 }
