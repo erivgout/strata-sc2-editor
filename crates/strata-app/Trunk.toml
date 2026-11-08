@@ -1,0 +1,13 @@
+# Web build: `trunk build --release` (output in dist/), `trunk serve` for development.
+[build]
+target = "index.html"
+dist = "dist"
+# Relative URLs so the app works from any sub-path (GitHub Pages, file shares).
+public_url = "./"
+filehash = true
+minify = "on_release"
+
+[serve]
+addresses = ["127.0.0.1"]
+port = 8080
+open = false

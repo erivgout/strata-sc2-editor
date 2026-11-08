@@ -795,10 +795,14 @@ pub fn reload_for_update() {
 
 /// Set the window or browser tab title.
 pub fn set_title(ctx: &egui::Context, title: &str) {
+    #[cfg(not(target_arch = "wasm32"))]
     ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.to_owned()));
     #[cfg(target_arch = "wasm32")]
-    if let Some(d) = web_sys::window().and_then(|w| w.document()) {
-        d.set_title(title);
+    {
+        let _ = ctx;
+        if let Some(d) = web_sys::window().and_then(|w| w.document()) {
+            d.set_title(title);
+        }
     }
 }
 

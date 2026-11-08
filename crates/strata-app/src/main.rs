@@ -59,8 +59,17 @@ fn main() {
         if let Some(loading) = document.get_element_by_id("loading") {
             match result {
                 Ok(()) => {
-                    // index.html fades the loading screen out, then removes it.
+                    // Fade out (CSS), then remove. Background tabs skip
+                    // transitions, so removal must not wait for one.
                     let _ = loading.class_list().add_1("done");
+                    let remove =
+                        wasm_bindgen::closure::Closure::once_into_js(move || loading.remove());
+                    if let Some(w) = web_sys::window() {
+                        let _ = w.set_timeout_with_callback_and_timeout_and_arguments_0(
+                            remove.unchecked_ref(),
+                            400,
+                        );
+                    }
                 }
                 Err(e) => {
                     let _ = loading.class_list().add_1("failed");

@@ -202,9 +202,7 @@ pub fn selection_fill(t: &Tokens, dark: bool) -> Color32 {
 }
 
 pub fn build_style(t: &Tokens, dark: bool) -> egui::Style {
-    let mut s = egui::Style::default();
-
-    s.text_styles = [
+    let text_styles = [
         (
             TextStyle::Small,
             FontId::new(12.0, FontFamily::Proportional),
@@ -222,6 +220,10 @@ pub fn build_style(t: &Tokens, dark: bool) -> egui::Style {
         (title_style(), FontId::new(20.0, semibold())),
     ]
     .into();
+    let mut s = egui::Style {
+        text_styles,
+        ..Default::default()
+    };
 
     // Spacing: a 4px grid.
     let sp = &mut s.spacing;
@@ -332,7 +334,7 @@ pub fn build_style(t: &Tokens, dark: bool) -> egui::Style {
     };
     w.inactive = egui::style::WidgetVisuals {
         // `bg_fill` backs checkboxes, radio buttons and slider rails.
-        bg_fill: if dark { t.bg_deep } else { t.bg_raised },
+        bg_fill: t.bg_deep,
         weak_bg_fill: button,
         bg_stroke: button_stroke,
         corner_radius: r,
@@ -437,6 +439,15 @@ pub fn dock_style(style: &egui::Style) -> egui_dock::Style {
     d.overlay.button_color = t.bg_raised;
     d.overlay.button_border_stroke = Stroke::new(1.0, t.stroke);
     d
+}
+
+/// Frame for modal dialogs: raised surface, 8px radius, roomy margins.
+pub fn dialog_frame(ctx: &egui::Context) -> egui::Frame {
+    let t = tokens(ctx);
+    egui::Frame::popup(&ctx.global_style())
+        .fill(t.bg_raised)
+        .corner_radius(8)
+        .inner_margin(Margin::same(20))
 }
 
 /// Accent color for a toast kind.

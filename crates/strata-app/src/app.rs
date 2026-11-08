@@ -226,8 +226,11 @@ impl StrataApp {
                     ("Discard", NoticeAction::DiscardRestored),
                 ],
             });
-        } else if app.settings.show_welcome {
-            app.dialog = Some(Dialog::Welcome);
+        } else {
+            app.state.history.mark_saved();
+            if app.settings.show_welcome {
+                app.dialog = Some(Dialog::Welcome);
+            }
         }
         app
     }
@@ -255,7 +258,7 @@ impl StrataApp {
     // Commands
 
     fn remember_command(&mut self, cmd: &Command) {
-        if matches!(cmd, Command::CommandPalette) {
+        if matches!(cmd, Command::OpenPalette) {
             return;
         }
         let r = &mut self.settings.recent_commands;
@@ -300,7 +303,7 @@ impl StrataApp {
             }
             Command::Undo => self.state.undo(),
             Command::Redo => self.state.redo(),
-            Command::CommandPalette => self.palette.toggle(),
+            Command::OpenPalette => self.palette.toggle(),
             Command::ShowShortcuts => self.shortcuts.open = !self.shortcuts.open,
             Command::SetMode(m) => self.state.mode = m,
             Command::FocusTab(t) => self.focus_tab(t),
@@ -369,7 +372,7 @@ impl StrataApp {
                 AppAction::SaveAs => Command::SaveAs,
                 AppAction::Undo => Command::Undo,
                 AppAction::Redo => Command::Redo,
-                AppAction::OpenCommandPalette => Command::CommandPalette,
+                AppAction::OpenCommandPalette => Command::OpenPalette,
                 AppAction::FocusTab(tab) => Command::FocusTab(tab),
                 AppAction::FrameWorld(p) => {
                     crate::panels::viewport::frame_world(&mut self.state, p);
@@ -548,7 +551,7 @@ impl StrataApp {
     fn menu_bar(&mut self, ui: &mut egui::Ui) {
         let t = theme::tokens(ui.ctx());
         let bar = ui.max_rect();
-        egui::MenuBar::new().ui(ui, |ui| {
+        let menus = egui::MenuBar::new().ui(ui, |ui| {
             let (r, _) = ui.allocate_exact_size(Vec2::new(22.0, 20.0), egui::Sense::hover());
             paint_logo(ui.painter(), r.center(), 16.0, &t);
             ui.add_space(2.0);
@@ -613,7 +616,7 @@ impl StrataApp {
                     can_redo,
                 );
                 ui.separator();
-                self.menu_cmd(ui, Command::CommandPalette);
+                self.menu_cmd(ui, Command::OpenPalette);
             });
             ui.menu_button("View", |ui| {
                 ui.menu_button("Modes", |ui| {
@@ -656,13 +659,18 @@ impl StrataApp {
                 }
                 ui.separator();
                 self.menu_cmd(ui, Command::About);
-            });
+            })
+            .response
+            .rect
+        });
 
-            // Command palette affordance, centered on the bar.
-            let w = 300.0_f32.min(bar.width() - ui.min_rect().right() * 2.0 - 16.0);
+        // Command palette affordance, centered on the bar.
+        let menus = menus.inner;
+        let w = 300.0_f32.min(bar.width() - (menus.right() - bar.left()) * 2.0 - 16.0);
+        {
             if w > 160.0 {
                 let rect = Rect::from_center_size(
-                    Pos2::new(bar.center().x, ui.min_rect().center().y),
+                    Pos2::new(bar.center().x, menus.center().y),
                     Vec2::new(w, 24.0),
                 );
                 let id = ui.id().with("palette-hint");
@@ -695,7 +703,7 @@ impl StrataApp {
                 );
                 let keys = ui
                     .ctx()
-                    .format_shortcut(&Command::CommandPalette.shortcut().unwrap_or(
+                    .format_shortcut(&Command::OpenPalette.shortcut().unwrap_or(
                         egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::K),
                     ));
                 p.text(
@@ -709,10 +717,10 @@ impl StrataApp {
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
                     .clicked()
                 {
-                    self.queued.push(Command::CommandPalette);
+                    self.queued.push(Command::OpenPalette);
                 }
             }
-        });
+        }
     }
 
     fn mode_rail(&mut self, ui: &mut egui::Ui) {
@@ -834,7 +842,7 @@ impl StrataApp {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
                 let dt = ui.input(|i| i.stable_dt);
-                if dt > 0.0 && dt < 0.25 {
+                if dt > 0.0 && dt < 0.05 {
                     ui.label(
                         RichText::new(format!("{:.0} fps", 1.0 / dt))
                             .small()
@@ -870,11 +878,7 @@ impl StrataApp {
         let mut created: Option<MapDocument> = None;
         let mut dialog = dialog;
         let id = egui::Id::new("strata-dialog");
-        let frame = egui::Frame::popup(&ctx.global_style())
-            .fill(t.bg_raised)
-            .corner_radius(8)
-            .inner_margin(egui::Margin::same(20));
-        let modal = egui::Modal::new(id).frame(frame);
+        let modal = egui::Modal::new(id).frame(theme::dialog_frame(ctx));
 
         match &mut dialog {
             Dialog::Welcome => {
@@ -1250,11 +1254,11 @@ impl eframe::App for StrataApp {
             // Keyboard toggles still close what they opened.
             ctx.input_mut(|i| {
                 if self.palette.is_open()
-                    && i.consume_shortcut(&Command::CommandPalette.shortcut().unwrap_or(
+                    && i.consume_shortcut(&Command::OpenPalette.shortcut().unwrap_or(
                         egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::K),
                     ))
                 {
-                    cmds.push(Command::CommandPalette);
+                    cmds.push(Command::OpenPalette);
                 }
                 if self.shortcuts.open && i.consume_key(egui::Modifiers::NONE, egui::Key::F1) {
                     cmds.push(Command::ShowShortcuts);
@@ -1374,7 +1378,7 @@ fn primary_button(ui: &mut egui::Ui, label: &str, enabled: bool, t: &Tokens) -> 
         egui::Button::new(text)
             .fill(t.accent)
             .stroke(Stroke::NONE)
-            .min_size(Vec2::new(96.0, 28.0)),
+            .min_size(Vec2::new(88.0, 24.0)),
     )
 }
 

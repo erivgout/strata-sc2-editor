@@ -22,7 +22,7 @@ pub enum Command {
     OpenRecent(String),
     Undo,
     Redo,
-    CommandPalette,
+    OpenPalette,
     ShowShortcuts,
     SetMode(Mode),
     FocusTab(Tab),
@@ -75,7 +75,7 @@ impl Command {
             Command::OpenRecent(p) => format!("Open {}", display_name(p)),
             Command::Undo => "Undo".into(),
             Command::Redo => "Redo".into(),
-            Command::CommandPalette => "Search commands…".into(),
+            Command::OpenPalette => "Search commands…".into(),
             Command::ShowShortcuts => "Keyboard shortcuts".into(),
             Command::SetMode(m) => format!("{} mode", m.label()),
             Command::FocusTab(t) => format!("Show {}", t.title()),
@@ -105,7 +105,7 @@ impl Command {
             Command::Undo | Command::Redo => "Edit",
             Command::SetMode(_) => "Mode",
             Command::FocusTab(_) => "Panel",
-            Command::Theme(_) | Command::ResetLayout | Command::CommandPalette => "View",
+            Command::Theme(_) | Command::ResetLayout | Command::OpenPalette => "View",
             Command::FrameMap | Command::ShowProblems => "Map",
             Command::ConnectAi => "AI link",
             Command::ShowShortcuts
@@ -157,7 +157,7 @@ impl Command {
             Command::SaveAs => ks(CMD_SHIFT, Key::S),
             Command::Undo => ks(Modifiers::COMMAND, Key::Z),
             Command::Redo => ks(CMD_SHIFT, Key::Z),
-            Command::CommandPalette => ks(Modifiers::COMMAND, Key::K),
+            Command::OpenPalette => ks(Modifiers::COMMAND, Key::K),
             Command::ShowShortcuts => ks(Modifiers::NONE, Key::F1),
             Command::SetMode(m) => ks(Modifiers::NONE, mode_key(*m)),
             _ => return None,
@@ -219,7 +219,7 @@ fn shortcut_commands() -> Vec<Command> {
         Command::OpenMap,
         Command::Save,
         Command::Undo,
-        Command::CommandPalette,
+        Command::OpenPalette,
         Command::ShowShortcuts,
     ];
     v.extend(Mode::ALL.map(Command::SetMode));
@@ -528,7 +528,7 @@ impl CommandPalette {
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 6.0;
                             for (k, what) in
-                                [("↑↓", "to move"), ("Enter", "to run"), ("Esc", "to close")]
+                                [("⏶⏷", "to move"), ("Enter", "to run"), ("Esc", "to close")]
                             {
                                 keycap(ui, k, &t);
                                 ui.label(egui::RichText::new(what).small().color(t.text_dim));
@@ -723,7 +723,7 @@ impl ShortcutsOverlay {
                     ),
                     (
                         "Search commands".into(),
-                        ctx.format_shortcut(&Command::CommandPalette.shortcut().unwrap()),
+                        ctx.format_shortcut(&Command::OpenPalette.shortcut().unwrap()),
                     ),
                     ("Keyboard shortcuts".into(), "F1".into()),
                 ],
@@ -738,50 +738,52 @@ impl ShortcutsOverlay {
             (
                 "Command palette",
                 vec![
-                    ("Move selection".into(), "↑  ↓".into()),
+                    ("Move selection".into(), "⏶ ⏷".into()),
                     ("Run command".into(), "Enter".into()),
                     ("Close".into(), "Esc".into()),
                 ],
             ),
         ];
-        let resp = egui::Modal::new(egui::Id::new("shortcuts-overlay")).show(ctx, |ui| {
-            ui.set_width(560.0_f32.min(ctx.content_rect().width() - 48.0));
-            ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new("Keyboard shortcuts").text_style(theme::title_style()),
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Close").clicked() {
-                        self.open = false;
-                    }
+        let resp = egui::Modal::new(egui::Id::new("shortcuts-overlay"))
+            .frame(theme::dialog_frame(ctx))
+            .show(ctx, |ui| {
+                ui.set_width(560.0_f32.min(ctx.content_rect().width() - 48.0));
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("Keyboard shortcuts").text_style(theme::title_style()),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Close").clicked() {
+                            self.open = false;
+                        }
+                    });
                 });
-            });
-            ui.label(
+                ui.label(
                 egui::RichText::new(
                     "Shortcuts that edit (undo, number keys) pause while you type in a text field.",
                 )
                 .color(t.text_dim),
             );
-            ui.add_space(12.0);
-            ui.columns(2, |cols| {
-                for (gi, (title, items)) in groups.iter().enumerate() {
-                    let ui = &mut cols[if gi % 2 == 0 { 0 } else { 1 }];
-                    ui.label(egui::RichText::new(*title).text_style(egui::TextStyle::Heading));
-                    ui.add_space(4.0);
-                    egui::Grid::new(("sc-grid", gi))
-                        .num_columns(2)
-                        .spacing([16.0, 6.0])
-                        .show(ui, |ui| {
-                            for (label, keys) in items {
-                                ui.label(label);
-                                keycap(ui, keys, &t);
-                                ui.end_row();
-                            }
-                        });
-                    ui.add_space(12.0);
-                }
+                ui.add_space(12.0);
+                ui.columns(2, |cols| {
+                    for (gi, (title, items)) in groups.iter().enumerate() {
+                        let ui = &mut cols[if gi % 2 == 0 { 0 } else { 1 }];
+                        ui.label(egui::RichText::new(*title).text_style(egui::TextStyle::Heading));
+                        ui.add_space(4.0);
+                        egui::Grid::new(("sc-grid", gi))
+                            .num_columns(2)
+                            .spacing([16.0, 6.0])
+                            .show(ui, |ui| {
+                                for (label, keys) in items {
+                                    ui.label(label);
+                                    keycap(ui, keys, &t);
+                                    ui.end_row();
+                                }
+                            });
+                        ui.add_space(12.0);
+                    }
+                });
             });
-        });
         if resp.should_close() {
             self.open = false;
         }

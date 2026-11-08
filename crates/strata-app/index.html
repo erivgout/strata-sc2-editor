@@ -2,17 +2,125 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Strata</title>
-  <link data-trunk rel="rust" data-bin="strata" data-wasm-opt="2">
+  <meta name="description" content="Strata: a fast StarCraft II map editor that runs in your browser, installs as an app, and runs natively.">
+  <meta name="theme-color" content="#1B232D">
+  <meta name="color-scheme" content="dark light">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" type="image/svg+xml" href="icons/icon.svg">
+  <link rel="icon" type="image/png" sizes="32x32" href="icons/icon-32.png">
+  <link rel="apple-touch-icon" href="icons/icon-180.png">
+
+  <link data-trunk rel="rust" data-bin="strata" data-wasm-opt="2" data-initializer="assets/initializer.js">
+  <link data-trunk rel="copy-file" href="assets/manifest.webmanifest">
+  <link data-trunk rel="copy-file" href="assets/sw.js">
+  <link data-trunk rel="copy-dir" href="assets/icons">
+
   <style>
-    html, body { margin: 0; height: 100%; overflow: hidden; background: #131920; color: #dde4ec; }
-    canvas { display: block; width: 100%; height: 100%; }
-    #loading { position: fixed; inset: 0; display: grid; place-items: center; font: 15px system-ui, sans-serif; }
+    :root { color-scheme: dark; }
+    html, body {
+      margin: 0; height: 100%; overflow: hidden;
+      background: #131920; color: #DDE4EC;
+      font: 15px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+    canvas { display: block; position: fixed; inset: 0; width: 100%; height: 100%; outline: none; }
+
+    #loading {
+      position: fixed; inset: 0; z-index: 10;
+      display: grid; place-items: center;
+      background: #1B232D;
+      transition: opacity 240ms ease-out;
+    }
+    #loading.done { opacity: 0; pointer-events: none; }
+    #loading .card { display: grid; justify-items: center; gap: 14px; padding: 24px; max-width: 420px; text-align: center; }
+    #loading svg { width: 72px; height: 72px; }
+    #loading .name { font-size: 22px; font-weight: 600; letter-spacing: 0.01em; }
+    #loading .track { width: 220px; height: 3px; border-radius: 2px; background: #252F3B; overflow: hidden; }
+    #loading .fill { height: 100%; width: 30%; border-radius: 2px; background: #62CDEB; animation: slide 1.1s ease-in-out infinite; }
+    #loading.measured .fill { animation: none; transition: width 120ms linear; }
+    #loading-status { color: #8A98A8; min-height: 1.4em; }
+    #loading-detail { color: #8A98A8; font-size: 12px; font-family: ui-monospace, monospace; white-space: pre-wrap; word-break: break-word; }
+    #loading.failed .track { display: none; }
+    #loading.failed #loading-status { color: #EC7078; }
+    @keyframes slide { 0% { transform: translateX(-100%); } 100% { transform: translateX(340%); } }
+    @media (prefers-reduced-motion: reduce) { #loading .fill { animation: none; width: 100%; opacity: 0.5; } }
   </style>
 </head>
 <body>
   <canvas id="strata_canvas"></canvas>
-  <div id="loading">Loading Strata…</div>
+  <div id="loading" role="status" aria-live="polite">
+    <div class="card">
+      <svg viewBox="0 0 512 512" aria-hidden="true">
+        <rect width="512" height="512" rx="112" fill="#131920"/>
+        <g fill="none" stroke="#62CDEB" stroke-width="34" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M116 360 L268 360 L316 312 L396 312" stroke-opacity="0.38"/>
+          <path d="M116 280 L212 280 L260 232 L396 232" stroke-opacity="0.68"/>
+          <path d="M116 200 L156 200 L204 152 L396 152"/>
+        </g>
+      </svg>
+      <div class="name">Strata</div>
+      <div class="track"><div class="fill"></div></div>
+      <div id="loading-status">Loading the editor…</div>
+      <div id="loading-detail"></div>
+    </div>
+  </div>
+  <noscript>
+    <p style="position:fixed;inset:auto 0 24px;text-align:center;color:#EC7078">Strata needs JavaScript and WebAssembly. Turn on JavaScript and reload.</p>
+  </noscript>
+
+  <script>
+    (function () {
+      const loading = document.getElementById("loading");
+      const status = document.getElementById("loading-status");
+      window.strataLoadingFailed = function (message, detail) {
+        loading.classList.add("failed");
+        status.textContent = message;
+        document.getElementById("loading-detail").textContent = detail || "";
+      };
+
+      // Strata renders with WebGL 2; say so up front instead of failing later.
+      const probe = document.createElement("canvas");
+      if (!probe.getContext("webgl2")) {
+        window.strataLoadingFailed(
+          "Strata needs WebGL 2, which this browser has turned off or does not support.",
+          "Update your browser or turn on hardware acceleration in its settings, then reload."
+        );
+      }
+
+      // Install as an app (PWA). Rust calls these through window.
+      let installPrompt = null;
+      window.addEventListener("beforeinstallprompt", function (e) {
+        e.preventDefault();
+        installPrompt = e;
+      });
+      window.addEventListener("appinstalled", function () { installPrompt = null; });
+      window.strataCanInstall = function () { return installPrompt !== null; };
+      window.strataInstall = async function () {
+        if (!installPrompt) return false;
+        const p = installPrompt;
+        installPrompt = null;
+        p.prompt();
+        const choice = await p.userChoice;
+        return choice.outcome === "accepted";
+      };
+
+      // Service worker: offline support plus an "update ready" notice.
+      let updateReady = false;
+      window.strataUpdateReady = function () { return updateReady; };
+      window.strataReload = function () { location.reload(); };
+      if ("serviceWorker" in navigator && location.protocol !== "file:") {
+        navigator.serviceWorker.addEventListener("message", function (e) {
+          if (e.data && e.data.type === "strata-update-ready") updateReady = true;
+        });
+        window.addEventListener("load", function () {
+          navigator.serviceWorker.register("./sw.js").catch(function (err) {
+            console.warn("Strata: offline support is unavailable:", err);
+          });
+        });
+      }
+    })();
+  </script>
 </body>
 </html>
