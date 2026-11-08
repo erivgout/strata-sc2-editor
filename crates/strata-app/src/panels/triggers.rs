@@ -689,11 +689,13 @@ fn rename_overlay(ui: &mut Ui, state: &EditorState, id: TriggerId, resp: &egui::
             s.store(ui.ctx(), edit_id);
         }
     }
-    ui.ctx().data_mut(|d| {
-        d.insert_temp(Id::new("trigger-rename-buf"), (id, text.clone(), r.lost_focus(), ui.input(|i| i.key_pressed(Key::Escape))))
-    });
-    if r.lost_focus() {
-        if ui.input(|i| i.key_pressed(Key::Escape)) {
+    // Read input before taking the data lock: nesting context locks deadlocks
+    // natively and panics on wasm.
+    let escape = ui.input(|i| i.key_pressed(Key::Escape));
+    let lost = r.lost_focus();
+    ui.ctx().data_mut(|d| d.insert_temp(Id::new("trigger-rename-buf"), (id, text.clone(), lost, escape)));
+    if lost {
+        if escape {
             out.push(TreeAction::Rename(id, String::new()));
         } else {
             out.push(TreeAction::Rename(id, text));
@@ -3357,6 +3359,25 @@ mod tests {
         frame(&mut state);
         // Nothing above is an edit, so history must be untouched.
         assert!(!state.history.can_undo());
+    }
+
+    /// New trigger opens an inline rename box. Drawing it used to take the
+    /// egui context lock twice, which hung the native app and panicked on wasm.
+    #[test]
+    fn new_trigger_rename_box_draws() {
+        let mut state = EditorState::new(MapDocument::new("Rename", 64, 64));
+        let ctx = egui::Context::default();
+        let run = |state: &mut EditorState| {
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| show(ui, state));
+            out.textures_delta.clear();
+        };
+        run(&mut state);
+        apply_tree_actions(&ctx, &mut state, vec![TreeAction::NewTrigger]);
+        assert!(state.ui.triggers.rename.is_some());
+        for _ in 0..3 {
+            run(&mut state);
+        }
+        assert!(state.doc.triggers.triggers().iter().any(|t| t.name.starts_with("New trigger")));
     }
 
     fn key(k: Key, modifiers: Modifiers) -> egui::Event {

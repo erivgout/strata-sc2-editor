@@ -1416,7 +1416,9 @@ fn inspector(ui: &mut Ui, cx: &mut Cx, i: usize) {
     if cx.ds.raw {
         raw_editor(ui, cx, i);
     } else {
-        egui::ScrollArea::vertical()
+        // Both axes: long values (actor event lists, flag sets) must scroll
+        // inside the pane instead of widening it past the window edge.
+        egui::ScrollArea::both()
             .id_salt("data_fields_scroll")
             .auto_shrink([false, false])
             .show(ui, |ui| {
