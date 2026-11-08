@@ -5,7 +5,7 @@
 //! than this build, the app asks the user. Installing downloads the Windows
 //! executable asset, verifies it against the release's `.sha256` asset
 //! (required: no checksum, no install), swaps it in for the running
-//! executable, and offers to restart.
+//! executable (with rollback, see [`swap_in`]), and offers to restart.
 //!
 //! Release asset naming (see `scripts/release.ps1`):
 //! `strata-v{version}-windows-x64.exe` and `strata-v{version}-windows-x64.exe.sha256`.
@@ -249,11 +249,60 @@ fn download_and_replace(release: &Release, tx: &Sender<Event>, ctx: &egui::Conte
     }
 
     let exe = std::env::current_exe().map_err(|e| format!("can't find Strata's own file ({e})"))?;
-    let staged = exe.with_file_name(format!(".strata-update-{}.exe", release.version_text()));
-    std::fs::write(&staged, &bytes).map_err(|e| format!("can't write the update next to Strata ({e})"))?;
-    let swapped = self_replace::self_replace(&staged).map_err(|e| format!("can't replace Strata's file ({e})"));
+    let tag = format!("{}-{}", release.version_text(), std::process::id());
+    let staged = exe.with_file_name(format!(".strata-update-{tag}.exe"));
+    let backup = exe.with_file_name(format!(".strata-old-{tag}.exe"));
+    // `create_new`: never reuse a file another instance (or anyone) made.
+    let written = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staged)
+        .and_then(|mut f| {
+            std::io::Write::write_all(&mut f, &bytes)?;
+            f.sync_all()
+        });
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&staged);
+        return Err(format!("can't write the update next to Strata ({e})"));
+    }
+    let swapped = swap_in(&exe, &staged, &backup);
     let _ = std::fs::remove_file(&staged);
     swapped
+}
+
+/// Put `staged` at `exe`'s path, keeping the old file at `backup`.
+///
+/// Windows lets a running executable be renamed (not overwritten), so:
+/// rename `exe` -> `backup`, then `staged` -> `exe`. If the second step
+/// fails the first is undone, so `exe` always exists afterwards. The backup
+/// of a successful swap is deleted on the next start ([`clean_up_old`]).
+fn swap_in(exe: &std::path::Path, staged: &std::path::Path, backup: &std::path::Path) -> Result<(), String> {
+    std::fs::rename(exe, backup).map_err(|e| format!("can't replace Strata's file ({e})"))?;
+    if let Err(e) = std::fs::rename(staged, exe) {
+        return match std::fs::rename(backup, exe) {
+            Ok(()) => Err(format!("can't put the update in place ({e})")),
+            Err(e2) => Err(format!(
+                "can't put the update in place ({e}), and restoring the old file failed ({e2}); it is at {}",
+                backup.display()
+            )),
+        };
+    }
+    Ok(())
+}
+
+/// Delete backups left by earlier updates (the running exe is the new one).
+pub fn clean_up_old() {
+    let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.to_path_buf())) else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for e in entries.flatten() {
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(".strata-old-") && name.ends_with(".exe") {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
 }
 
 /// Start the (now updated) executable and let the caller close this one.
@@ -301,6 +350,29 @@ mod tests {
         let mut pre = release_json("v0.3.0", &names);
         pre["prerelease"] = json!(true);
         assert_eq!(pick_release(&pre, (0, 1, 0)).unwrap(), None);
+    }
+
+    #[test]
+    fn swap_replaces_and_rolls_back() {
+        let dir = std::env::temp_dir().join(format!("strata-swap-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (exe, staged, backup) = (dir.join("strata.exe"), dir.join("new.exe"), dir.join("old.exe"));
+
+        std::fs::write(&exe, b"old").unwrap();
+        std::fs::write(&staged, b"new").unwrap();
+        swap_in(&exe, &staged, &backup).unwrap();
+        assert_eq!(std::fs::read(&exe).unwrap(), b"new");
+        assert_eq!(std::fs::read(&backup).unwrap(), b"old");
+
+        // Failure after the first rename (the staged file is gone): the
+        // original executable must be back in place.
+        std::fs::remove_file(&backup).unwrap();
+        std::fs::write(&exe, b"old").unwrap();
+        assert!(swap_in(&exe, &dir.join("missing.exe"), &backup).is_err());
+        assert_eq!(std::fs::read(&exe).unwrap(), b"old");
+        assert!(!backup.exists());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

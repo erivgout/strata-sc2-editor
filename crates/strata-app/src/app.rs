@@ -350,7 +350,10 @@ impl StrataApp {
         };
         app.game_data.start(&cc.egui_ctx);
         #[cfg(not(target_arch = "wasm32"))]
-        app.updater.check(&cc.egui_ctx, false);
+        {
+            crate::updater::clean_up_old();
+            app.updater.check(&cc.egui_ctx, false);
+        }
         // STRATA_OPEN=<map>: open a map on start (native; used to check
         // rendering against real maps).
         #[cfg(not(target_arch = "wasm32"))]
@@ -504,7 +507,22 @@ impl StrataApp {
             Command::ShowWelcome => self.dialog = Some(Dialog::Welcome),
             Command::About => self.dialog = Some(Dialog::About),
             #[cfg(not(target_arch = "wasm32"))]
-            Command::CheckForUpdates => self.updater.check(ctx, true),
+            Command::CheckForUpdates => match &self.updater.status {
+                // Already installed (e.g. the restart was cancelled): offer it again.
+                crate::updater::Status::Ready(v) => {
+                    let text = format!("Strata {v} is installed. Restart to start using it.");
+                    self.notice(Notice {
+                        key: "update",
+                        kind: ToastKind::Success,
+                        text,
+                        actions: vec![
+                            ("Restart now", NoticeAction::Run(Command::RestartToUpdate)),
+                            ("Later", NoticeAction::Dismiss),
+                        ],
+                    });
+                }
+                _ => self.updater.check(ctx, true),
+            },
             #[cfg(not(target_arch = "wasm32"))]
             Command::InstallUpdate => {
                 if let Some(r) = self.update_offer.clone() {

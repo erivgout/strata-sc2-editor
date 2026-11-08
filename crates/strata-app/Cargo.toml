@@ -30,7 +30,6 @@ miniz_oxide = "0.8"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 ureq = "3"
-self-replace = "1"
 sha2 = "0.10"
 env_logger = "0.11"
 tungstenite = "0.27"
