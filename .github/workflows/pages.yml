@@ -28,10 +28,10 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - name: Install trunk
-        run: curl -sSfL "https://github.com/trunk-rs/trunk/releases/download/${TRUNK_VERSION}/trunk-x86_64-unknown-linux-gnu.tar.gz" | tar -xz -C /usr/local/bin
+        run: curl -sSfL --retry 5 --retry-all-errors --retry-delay 10 "https://github.com/trunk-rs/trunk/releases/download/${TRUNK_VERSION}/trunk-x86_64-unknown-linux-gnu.tar.gz" | tar -xz -C /usr/local/bin
       - name: Build release bundle
         working-directory: crates/strata-app
-        run: trunk build --release
+        run: for i in 1 2 3 4; do trunk build --release && exit 0; echo "trunk build failed (attempt $i), retrying"; sleep 30; done; exit 1
       - name: Stamp the service worker version
         # A changed sw.js makes installed apps fetch the new version and
         # offer a reload.
