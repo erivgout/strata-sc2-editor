@@ -343,8 +343,30 @@ pathing sets (on: true) or clears `flags` on cells. Heights clamp to -16..64. Us
                 "parent": string("Parent entry id for a new entry (inherits its fields)."),
                 "file": string("GameData file, e.g. \"UnitData\". Only needed for classes Strata cannot place."),
             }), &["class", "id", "field", "value"])),
+        read(def("list_base_units", "List base-game units",
+            "List the real placeable units of StarCraft II (from the user's install: Core, Liberty, Swarm, Void and the multiplayer mods) with their display names, race and size. Use these ids for place_unit, set_data_field parents and triggers. editor_status.base_data says whether the data is loaded.",
+            obj(json!({
+                "search": string("Case-insensitive substring of id or display name, e.g. \"siege\"."),
+                "race": enumeration("Only this race.", &["terran", "protoss", "zerg", "neutral"]),
+                "melee_only": boolean("Only multiplayer (melee) units. Default true; false adds campaign, hero and story units."),
+                "limit": limit(),
+            }), &[]))),
+        read(def("search_base_data", "Search base-game data",
+            "Search the base game's catalogs (units, abilities, weapons, effects, behaviors, upgrades, actors, models, buttons, requirements) by id or display name.",
+            obj(json!({
+                "query": string("Case-insensitive substring of id or display name."),
+                "kind": enumeration("Catalog family.", &["unit", "ability", "weapon", "effect", "behavior", "upgrade", "actor", "model", "button", "requirement"]),
+                "limit": limit(),
+            }), &["query"]))),
+        read(def("get_base_data", "Get base-game entry",
+            "One base-game catalog entry with every field it has after inheritance (its parents and class default), e.g. Marine: LifeMax 45, Speed 2.25. Map entries with the same id or this id as parent inherit these values.",
+            obj(json!({
+                "kind": enumeration("Catalog family.", &["unit", "ability", "weapon", "effect", "behavior", "upgrade", "actor", "model", "button", "requirement"]),
+                "id": string("Entry id, e.g. \"Marine\"."),
+                "full": boolean("Also return the entry's merged XML (default false)."),
+            }), &["kind", "id"]))),
         read(def("list_data", "List data",
-            "List the map's GameData catalog entries (only what this map defines or overrides, not the built-in game data) with their scalar fields.",
+            "List the map's GameData catalog entries (only what this map defines or overrides, not the built-in game data; see search_base_data and get_base_data for that) with their scalar fields.",
             obj(json!({
                 "kind": enumeration("Catalog family.", &["unit", "ability", "weapon", "effect", "behavior", "upgrade", "actor", "model", "button", "requirement", "other"]),
                 "class": string("Only this class, e.g. \"CUnit\"."),
@@ -998,6 +1020,30 @@ pub fn call(s: &Strata, name: &str, args: &Value) -> Result<String, CallError> {
             limit: a.int("limit", 1, 5000)?.map(|l| l as usize),
         }),
 
+        "list_base_units" => {
+            let race = a.str("race")?;
+            let v = crate::base::list_units(
+                a.str("search")?.as_deref(),
+                race.as_deref(),
+                a.bool("melee_only")?.unwrap_or(true),
+                a.int("limit", 1, 5000)?.unwrap_or(200) as usize,
+            )?;
+            Ok(serde_json::to_string_pretty(&v).unwrap_or_default())
+        }
+        "search_base_data" => {
+            let v = crate::base::search(
+                &a.need_str("query")?,
+                catalog_kind(&a)?,
+                a.int("limit", 1, 5000)?.unwrap_or(200) as usize,
+            )?;
+            Ok(serde_json::to_string_pretty(&v).unwrap_or_default())
+        }
+        "get_base_data" => {
+            let kind = catalog_kind(&a)?.ok_or("\"kind\" is required")?;
+            let v = crate::base::get_entry(kind, &a.need_str("id")?, a.bool("full")?.unwrap_or(false))?;
+            Ok(serde_json::to_string_pretty(&v).unwrap_or_default())
+        }
+
         "set_map_info" => {
             let playable = match a.floats("playable", 4)? {
                 Some(p) if p.iter().all(|v| *v >= 0.0 && v.fract() == 0.0) => {
@@ -1116,6 +1162,53 @@ mod tests {
             call(&s, "bogus", &json!({})),
             Err(CallError::UnknownTool("bogus".into()))
         );
+    }
+
+    #[test]
+    fn base_data_tools() {
+        let s = Strata::headless_only(MapDocument::new("t", 32, 32));
+        let mut b = strata_core::base_data::BaseCatalog::builder("0.0.0.1");
+        b.begin_mod("Liberty");
+        b.add_catalog(
+            "UnitData.xml",
+            br#"<Catalog>
+                <CUnit default="1"><Radius value="0.5"/></CUnit>
+                <CUnit id="SiegeTank">
+                    <Race value="Terr"/><LifeMax value="175"/>
+                    <EditorCategories value="ObjectType:Unit,ObjectFamily:Melee"/>
+                </CUnit>
+                <CUnit id="Raynor" parent="SiegeTank">
+                    <EditorCategories value="ObjectType:Hero,ObjectFamily:Campaign"/>
+                </CUnit>
+            </Catalog>"#,
+        )
+        .unwrap();
+        b.add_strings(b"Unit/Name/SiegeTank=Siege Tank\n");
+        crate::base::set(b.finish());
+
+        let units: Value =
+            serde_json::from_str(&call(&s, "list_base_units", &json!({"search": "siege"})).unwrap()).unwrap();
+        assert_eq!(units["units"][0]["name"], "Siege Tank");
+        assert_eq!(units["units"][0]["race"], "terran");
+        assert_eq!(units["total"], 1);
+        let all: Value = serde_json::from_str(
+            &call(&s, "list_base_units", &json!({"melee_only": false, "limit": 1})).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(all["total"], 2);
+        assert_eq!(all["units"].as_array().map(Vec::len), Some(1));
+        let hits: Value =
+            serde_json::from_str(&call(&s, "search_base_data", &json!({"query": "tank", "kind": "unit"})).unwrap())
+                .unwrap();
+        assert_eq!(hits["results"][0]["id"], "SiegeTank");
+        let raynor: Value =
+            serde_json::from_str(&call(&s, "get_base_data", &json!({"kind": "unit", "id": "Raynor"})).unwrap()).unwrap();
+        assert_eq!(raynor["fields"]["LifeMax"], "175");
+        assert_eq!(raynor["fields"]["Radius"], "0.5");
+        assert_eq!(raynor["inherits_from"][0], "SiegeTank");
+        assert!(call(&s, "get_base_data", &json!({"kind": "unit", "id": "Nope"})).is_err());
+        let status = s.status();
+        assert_eq!(status["base_data"]["units"], 2);
     }
 
     #[test]

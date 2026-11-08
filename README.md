@@ -100,6 +100,16 @@ Undo, redo and the number keys pause while a text field has focus. Browsers
 reserve some shortcuts (such as Ctrl+N); use the menu or the command palette
 there.
 
+## Base-game data
+
+Strata reads the real units, abilities, weapons and their names from your own
+StarCraft II install, so the unit palette lists every unit and the Data panel
+shows real inherited values (Marine LifeMax 45, from Marine in the base game).
+The native app finds the install on start (`STRATA_SC2_DIR` or the default
+Program Files folder) and caches a compact index; in the browser, run **Map >
+Load game data from StarCraft II folder…** (Chrome or Edge read the folder
+in place; nothing is uploaded). No Blizzard data ships with Strata.
+
 ## AI assistants (MCP)
 
 Strata ships an MCP server so assistants such as Claude can inspect and edit
@@ -111,6 +121,7 @@ and labeled in History. See [`crates/strata-mcp`](crates/strata-mcp).
 ```
 crates/
   strata-mpq/      MPQ archive reading and writing (.SC2Map containers)
+  strata-casc/     Reads the installed game's CASC storage (base-game mods)
   strata-core/     Document model, undoable edits, ops API, validation, Galaxy codegen
   strata-format/   Load and save .SC2Map archives and folders to the document model
   strata-app/      The editor (egui + egui_dock); native and web

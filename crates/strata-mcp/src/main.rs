@@ -188,6 +188,7 @@ fn main() {
     };
 
     let strata = Arc::new(Strata::new(Headless::new(doc, path), bridge, live));
+    strata_mcp::base::start_loading();
 
     if let Some(h) = http {
         log!("MCP over HTTP at {}", h.url());

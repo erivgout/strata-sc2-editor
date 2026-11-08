@@ -106,6 +106,101 @@
         return choice.outcome === "accepted";
       };
 
+      // Reading the user's StarCraft II folder for base-game data (Rust:
+      // game_data.rs). Files are read lazily, a byte range at a time, and
+      // never leave the browser. Chrome/Edge use the File System Access
+      // API; other browsers fall back to a folder input where available.
+      const sc2 = { handle: null, files: null, dirs: new Map() };
+      window.strataSc2Support = function () {
+        if ("showDirectoryPicker" in window) return "picker";
+        return "webkitdirectory" in document.createElement("input") ? "input" : "";
+      };
+      window.strataSc2Pick = function () {
+        if ("showDirectoryPicker" in window) {
+          return window.showDirectoryPicker({ id: "strata-sc2", mode: "read" }).then(function (h) {
+            sc2.handle = h; sc2.files = null; sc2.dirs = new Map();
+            return h.name;
+          }, function (e) {
+            if (e && e.name === "AbortError") return null;
+            throw String(e && e.message || e);
+          });
+        }
+        return new Promise(function (resolve) {
+          const input = document.createElement("input");
+          input.type = "file";
+          input.webkitdirectory = true;
+          input.addEventListener("change", function () {
+            const files = new Map();
+            let root = null;
+            for (const f of input.files) {
+              const p = f.webkitRelativePath || f.name;
+              const i = p.indexOf("/");
+              root = root || p.slice(0, i);
+              files.set(p.slice(i + 1).toLowerCase(), f);
+            }
+            sc2.handle = null; sc2.files = files;
+            resolve(files.size ? root : null);
+          });
+          input.addEventListener("cancel", function () { resolve(null); });
+          input.click();
+        });
+      };
+      // Directory handle for a relative path, matching names case-insensitively.
+      async function sc2Dir(parts) {
+        let dir = sc2.handle;
+        let key = "";
+        for (const part of parts) {
+          key += "/" + part.toLowerCase();
+          let next = sc2.dirs.get(key);
+          if (!next) {
+            for await (const [name, h] of dir.entries()) {
+              if (h.kind === "directory" && name.toLowerCase() === part.toLowerCase()) { next = h; break; }
+            }
+            if (!next) throw "no folder " + parts.join("/");
+            sc2.dirs.set(key, next);
+          }
+          dir = next;
+        }
+        return dir;
+      }
+      async function sc2File(path) {
+        if (sc2.files) {
+          const f = sc2.files.get(path.toLowerCase());
+          if (!f) throw "no file " + path;
+          return f;
+        }
+        if (!sc2.handle) throw "no StarCraft II folder chosen";
+        const parts = path.split("/");
+        const name = parts.pop();
+        const dir = await sc2Dir(parts);
+        try {
+          return await (await dir.getFileHandle(name)).getFile();
+        } catch (e) {
+          for await (const [n, h] of dir.entries()) {
+            if (h.kind === "file" && n.toLowerCase() === name.toLowerCase()) return await h.getFile();
+          }
+          throw "no file " + path;
+        }
+      }
+      window.strataSc2Read = async function (path, offset, len) {
+        const file = await sc2File(path);
+        const blob = len === null || len === undefined ? file.slice(offset) : file.slice(offset, offset + len);
+        return new Uint8Array(await blob.arrayBuffer());
+      };
+      window.strataSc2List = async function (path) {
+        const out = [];
+        if (sc2.files) {
+          const prefix = path.toLowerCase() + "/";
+          for (const k of sc2.files.keys()) {
+            if (k.startsWith(prefix) && k.indexOf("/", prefix.length) < 0) out.push(k.slice(prefix.length));
+          }
+          return out;
+        }
+        const dir = await sc2Dir(path.split("/").filter(Boolean));
+        for await (const [name, h] of dir.entries()) if (h.kind === "file") out.push(name);
+        return out;
+      };
+
       // Service worker: offline support plus an "update ready" notice.
       let updateReady = false;
       window.strataUpdateReady = function () { return updateReady; };

@@ -31,6 +31,8 @@ pub enum Command {
     Theme(ThemePref),
     ResetLayout,
     ConnectAi,
+    /// Read units, abilities and names from the user's StarCraft II install.
+    LoadGameData,
     FrameMap,
     ShowProblems,
     InstallApp,
@@ -96,6 +98,7 @@ impl Command {
             Command::Theme(ThemePref::System) => "Match system theme".into(),
             Command::ResetLayout => "Reset workspace layout".into(),
             Command::ConnectAi => "Connect an AI client (MCP)…".into(),
+            Command::LoadGameData => "Load game data from StarCraft II folder…".into(),
             Command::FrameMap => "Frame the whole map".into(),
             Command::ShowProblems => "Check map for problems".into(),
             Command::InstallApp => "Install Strata as an app".into(),
@@ -120,6 +123,7 @@ impl Command {
             Command::FocusTab(_) => "Panel",
             Command::Theme(_) | Command::ResetLayout | Command::OpenPalette => "View",
             Command::FrameMap | Command::ShowProblems => "Map",
+            Command::LoadGameData => "Data",
             Command::ConnectAi => "AI link",
             Command::ShowShortcuts
             | Command::InstallApp
@@ -158,6 +162,7 @@ impl Command {
             Command::Theme(_) => "appearance color mode",
             Command::ResetLayout => "panels dock restore default workspace",
             Command::ConnectAi => "mcp claude assistant link disconnect",
+            Command::LoadGameData => "base game install casc units catalog blizzard mods",
             Command::FrameMap => "zoom fit camera center",
             Command::ShowProblems => "validate errors warnings",
             Command::InstallApp => "pwa desktop offline",
@@ -217,6 +222,7 @@ pub fn all(cx: &Context<'_>) -> Vec<Command> {
         Command::ResetLayout,
         Command::FrameMap,
         Command::ShowProblems,
+        Command::LoadGameData,
         Command::ConnectAi,
         Command::ShowShortcuts,
         Command::ShowWelcome,

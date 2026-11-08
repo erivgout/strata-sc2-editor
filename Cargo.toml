@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/strata-mpq", "crates/strata-core", "crates/strata-format", "crates/strata-app", "crates/strata-mcp"]
+members = ["crates/strata-mpq", "crates/strata-casc", "crates/strata-core", "crates/strata-format", "crates/strata-app", "crates/strata-mcp"]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,6 +10,7 @@ rust-version = "1.85"
 
 [workspace.dependencies]
 strata-mpq = { path = "crates/strata-mpq" }
+strata-casc = { path = "crates/strata-casc" }
 strata-core = { path = "crates/strata-core" }
 strata-format = { path = "crates/strata-format" }
 serde = { version = "1", features = ["derive"] }

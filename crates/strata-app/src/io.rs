@@ -668,7 +668,7 @@ pub fn clear_autosave() {
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-mod base64 {
+pub(crate) mod base64 {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
     pub fn encode(data: &[u8]) -> String {

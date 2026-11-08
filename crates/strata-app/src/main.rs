@@ -2,6 +2,7 @@
 
 mod app;
 mod commands;
+mod game_data;
 mod io;
 mod mcp_link;
 mod panels;

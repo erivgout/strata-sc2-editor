@@ -4,8 +4,12 @@
 //! drag a value) and are recorded as one undoable edit when the interaction
 //! ends: drag released, field unfocused, or a choice made in a combo box.
 
+use std::collections::HashMap;
+
 use egui::{Color32, RichText};
+use strata_core::base_data::{BaseCatalog, BaseUnit};
 use strata_core::brush::{BrushShape, Falloff};
+use strata_core::catalog::CatalogKind;
 use strata_core::history::Edit;
 use strata_core::known::{self, UnitGroup};
 use strata_core::objects::{ObjectKind, PlacedObject};
@@ -24,6 +28,8 @@ pub struct InspectorState {
     pending: Option<Pending>,
     unit_search: String,
     doodad_search: String,
+    /// Base-game unit list: include campaign and story units, not just melee.
+    all_units: bool,
 }
 
 /// Snapshot taken when a property edit starts; committed when it ends.
@@ -531,6 +537,10 @@ fn unit_picker(ui: &mut egui::Ui, state: &mut EditorState, tk: &Tokens) {
     let search = &mut state.ui.inspector.unit_search;
     ui.add(egui::TextEdit::singleline(search).hint_text("Search units").desired_width(f32::INFINITY));
     let q = search.to_lowercase();
+    if let Some(base) = state.base.clone() {
+        base_unit_list(ui, state, &base, &q, tk);
+        return;
+    }
     let mut pick = None;
     egui::ScrollArea::vertical().auto_shrink([false, true]).id_salt("unit-list").max_height(260.0).show(ui, |ui| {
         for g in UnitGroup::ALL {
@@ -563,9 +573,92 @@ fn unit_picker(ui: &mut egui::Ui, state: &mut EditorState, tk: &Tokens) {
     if known::is_neutral_unit(&state.place_type) {
         hint(ui, tk, "Resources and neutral objects are placed for the neutral player.");
     }
+    hint(ui, tk, "Showing common units. Load game data (Map menu) to list every unit in StarCraft II.");
 }
 
-fn doodad_picker(ui: &mut egui::Ui, state: &mut EditorState, _tk: &Tokens) {
+type UnitFilter = fn(&BaseUnit) -> bool;
+
+/// Every placeable unit of the base game, grouped by race then by kind.
+fn base_unit_list(ui: &mut egui::Ui, state: &mut EditorState, base: &BaseCatalog, q: &str, tk: &Tokens) {
+    ui.checkbox(&mut state.ui.inspector.all_units, "Include campaign units")
+        .on_hover_text("Also list campaign, hero and story-mode units, not just multiplayer ones");
+    let all = state.ui.inspector.all_units;
+    let units: Vec<&BaseUnit> = base
+        .units()
+        .iter()
+        // Unnamed melee units are internal variants; they show up when searched.
+        .filter(|u| all || (u.is_melee() && (u.named || !q.is_empty())) || u.id == state.place_type)
+        .filter(|u| q.is_empty() || u.name.to_lowercase().contains(q) || u.id.to_lowercase().contains(q))
+        .collect();
+    let mut names: HashMap<&str, usize> = HashMap::new();
+    for u in &units {
+        *names.entry(u.name.as_str()).or_default() += 1;
+    }
+    let sections: [(&str, UnitFilter); 3] = [
+        ("Units", |u| !u.structure && u.object_type != "Hero"),
+        ("Heroes", |u| u.object_type == "Hero"),
+        ("Structures", |u| u.structure),
+    ];
+    let mut pick: Option<(String, UnitGroup)> = None;
+    egui::ScrollArea::vertical().id_salt("base-unit-list").max_height(320.0).show(ui, |ui| {
+        if units.is_empty() {
+            hint(ui, tk, "No units match. Any unit id can still be typed above.");
+        }
+        for g in UnitGroup::ALL {
+            let items: Vec<&BaseUnit> = units.iter().copied().filter(|u| u.race == g).collect();
+            if items.is_empty() {
+                continue;
+            }
+            let open = items.iter().any(|u| u.id == state.place_type);
+            egui::CollapsingHeader::new(format!("{}  ({})", g.label(), items.len()))
+                .id_salt(("base-units", g.label()))
+                .open(if q.is_empty() { None } else { Some(true) })
+                .default_open(open)
+                .show(ui, |ui| {
+                    for (label, keep) in sections {
+                        let sub: Vec<&BaseUnit> = items.iter().copied().filter(|u| keep(u)).collect();
+                        if sub.is_empty() {
+                            continue;
+                        }
+                        ui.label(RichText::new(label).small().color(tk.text_dim));
+                        for u in sub {
+                            let text = if names.get(u.name.as_str()).copied().unwrap_or(0) > 1 && u.name != u.id {
+                                format!("{} ({})", u.name, u.id)
+                            } else {
+                                u.name.clone()
+                            };
+                            let tip = format!(
+                                "{} · {}{} · {}.SC2Mod",
+                                u.id,
+                                u.object_type,
+                                if u.air { " · air" } else { "" },
+                                u.source_mod
+                            );
+                            if ui.selectable_label(state.place_type == u.id, text).on_hover_text(tip).clicked() {
+                                pick = Some((u.id.clone(), u.race));
+                            }
+                        }
+                    }
+                });
+        }
+    });
+    if let Some((id, race)) = pick {
+        state.place_type = id;
+        // Resources, rocks and critters belong to the neutral player.
+        if race == UnitGroup::Neutral {
+            state.place_player = 0;
+        } else if state.place_player == 0 {
+            state.place_player = 1;
+        }
+    }
+    if base.unit(&state.place_type).is_some_and(|u| u.race == UnitGroup::Neutral) {
+        hint(ui, tk, "Neutral objects are usually owned by the neutral player.");
+    } else if !state.place_type.is_empty() && !base.has_unit(&state.place_type) {
+        hint(ui, tk, &format!("\"{}\" is not a base-game unit; make sure the map defines it.", state.place_type));
+    }
+}
+
+fn doodad_picker(ui: &mut egui::Ui, state: &mut EditorState, tk: &Tokens) {
     ui.horizontal(|ui| {
         ui.label("Doodad");
         ui.add(
@@ -575,6 +668,22 @@ fn doodad_picker(ui: &mut egui::Ui, state: &mut EditorState, _tk: &Tokens) {
     let search = &mut state.ui.inspector.doodad_search;
     ui.add(egui::TextEdit::singleline(search).hint_text("Search doodads").desired_width(f32::INFINITY));
     let q = search.to_lowercase();
+    if let Some(base) = state.base.clone() {
+        let matches: Vec<&String> =
+            base.doodads().iter().filter(|d| q.is_empty() || d.to_lowercase().contains(&q)).collect();
+        let shown = matches.len().min(400);
+        egui::ScrollArea::vertical().auto_shrink([false, true]).id_salt("base-doodad-list").max_height(260.0).show(ui, |ui| {
+            for d in &matches[..shown] {
+                if ui.selectable_label(state.place_type == **d, d.as_str()).clicked() {
+                    state.place_type = (*d).clone();
+                }
+            }
+        });
+        if matches.len() > shown {
+            hint(ui, tk, &format!("{shown} of {} doodads; search to narrow the list.", matches.len()));
+        }
+        return;
+    }
     egui::ScrollArea::vertical().auto_shrink([false, true]).id_salt("doodad-list").max_height(220.0).show(ui, |ui| {
         for d in known::DOODADS {
             if !q.is_empty() && !d.name.to_lowercase().contains(&q) && !d.id.to_lowercase().contains(&q) {
@@ -699,8 +808,14 @@ fn object_properties(ui: &mut egui::Ui, state: &mut EditorState, edits: &mut Edi
         ui.end_row();
         if !ty_mixed {
             let point_name = || known::POINT_TYPES.iter().find(|k| k.id == ty).map(|k| k.name);
-            if let Some(name) =
-                known::unit_name(&ty).or(known::doodad_name(&ty)).or_else(point_name).filter(|n| *n != ty)
+            let base_name =
+                state.base.as_ref().and_then(|b| b.display_name(CatalogKind::Unit, &ty)).map(str::to_owned);
+            if let Some(name) = base_name
+                .as_deref()
+                .or(known::unit_name(&ty))
+                .or(known::doodad_name(&ty))
+                .or_else(point_name)
+                .filter(|n| *n != ty)
             {
                 ui.label("");
                 ui.label(RichText::new(name).color(tk.text_dim).size(12.0));
@@ -986,6 +1101,29 @@ mod tests {
         assert_eq!(s.doc.objects.get(id).unwrap().position.x, 7.0);
         s.undo();
         assert_eq!(s.doc.objects.get(id).unwrap().position.x, 4.0);
+    }
+
+    #[test]
+    fn pickers_render_with_and_without_base_data() {
+        let mut s = EditorState::new(MapDocument::new("t", 32, 32));
+        let ctx = egui::Context::default();
+        let frame = |s: &mut EditorState| {
+            let mut out = ctx.run_ui(Default::default(), |ui| {
+                egui::CentralPanel::default().show(ui, |ui| show(ui, s));
+            });
+            out.textures_delta.clear();
+        };
+        for mode in [Mode::Units, Mode::Doodads] {
+            s.mode = mode;
+            frame(&mut s);
+        }
+        s.base = Some(crate::panels::data::tests::sample_base());
+        s.ui.inspector.unit_search = "mineral".into();
+        for mode in [Mode::Units, Mode::Doodads] {
+            s.mode = mode;
+            frame(&mut s);
+        }
+        assert_eq!(s.base.as_ref().unwrap().units().len(), 2);
     }
 
     #[test]

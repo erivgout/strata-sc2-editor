@@ -8,9 +8,11 @@
 //! - [`http`]: Streamable HTTP transport (`POST /mcp`).
 //! - [`trigger_json`]: the simplified trigger JSON accepted by trigger tools.
 //! - [`token`]: the live-link session token.
+//! - [`base`]: the base game's units and catalogs, read from the user's install.
 //!
 //! stdout belongs to the stdio transport; everything else logs to stderr.
 
+pub mod base;
 pub mod bridge;
 pub mod http;
 pub mod rpc;

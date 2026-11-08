@@ -3,7 +3,9 @@
 //! independently.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
+use strata_core::base_data::BaseCatalog;
 use strata_core::brush::Brush;
 use strata_core::history::{Edit, History, Origin};
 use strata_core::objects::ObjectId;
@@ -194,6 +196,8 @@ pub struct EditorState {
     pub toasts: Vec<Toast>,
     pub actions: Vec<AppAction>,
     pub ui: PanelStates,
+    /// The base game's catalogs, once read from the user's install.
+    pub base: Option<Arc<BaseCatalog>>,
     problems: (u64, Vec<Problem>),
 }
 
@@ -211,6 +215,7 @@ impl EditorState {
             toasts: Vec::new(),
             actions: Vec::new(),
             ui: PanelStates::default(),
+            base: None,
             problems: (u64::MAX, Vec::new()),
         }
     }
@@ -221,6 +226,7 @@ impl EditorState {
         *self = Self {
             mode: self.mode,
             brush: self.brush,
+            base: self.base.take(),
             ui,
             ..Self::new(doc)
         };

@@ -304,6 +304,8 @@ pub struct StrataApp {
     pending_then: Option<Then>,
     /// Commands requested this frame (menus, rail, palette, keyboard).
     queued: Vec<Command>,
+    /// Base-game data from the user's StarCraft II install.
+    game_data: crate::game_data::GameData,
 }
 
 impl StrataApp {
@@ -329,7 +331,9 @@ impl StrataApp {
             after_save: None,
             pending_then: None,
             queued: Vec::new(),
+            game_data: Default::default(),
         };
+        app.game_data.start(&cc.egui_ctx);
         if let Some(rec) = crate::io::restore_autosave() {
             app.state.load(rec.doc, rec.file_name);
             // Mark the restored map as unsaved so the guard and title show it.
@@ -439,6 +443,16 @@ impl StrataApp {
                     .toast(ToastKind::Info, format!("Reset the {} layout", ws.label()));
             }
             Command::ConnectAi => self.focus_tab(Tab::Mcp),
+            Command::LoadGameData => {
+                if let Err(e) = self.game_data.pick_folder(ctx) {
+                    self.notice(Notice {
+                        key: "game-data",
+                        kind: ToastKind::Error,
+                        text: e,
+                        actions: vec![("Dismiss", NoticeAction::Dismiss)],
+                    });
+                }
+            }
             Command::FrameMap => {
                 let center = self.state.doc.world_size() * 0.5;
                 crate::panels::viewport::frame_world(&mut self.state, center);
@@ -541,6 +555,85 @@ impl StrataApp {
                     actions,
                 });
             }
+        }
+    }
+
+    fn handle_game_data(&mut self) {
+        use crate::game_data::Event;
+        match self.game_data.poll() {
+            Some(Event::Loaded { catalog, from_cache }) => {
+                if !from_cache {
+                    self.state.toast(
+                        ToastKind::Success,
+                        format!(
+                            "Loaded StarCraft II {} data: {} units, {} catalog entries",
+                            catalog.version,
+                            catalog.units().len(),
+                            catalog.len()
+                        ),
+                    );
+                }
+                self.notices.retain(|n| n.key != "game-data");
+                self.state.base = Some(catalog);
+            }
+            Some(Event::Failed(text)) => self.notice(Notice {
+                key: "game-data",
+                kind: ToastKind::Error,
+                text,
+                actions: vec![
+                    ("Choose folder", NoticeAction::Run(Command::LoadGameData)),
+                    ("Dismiss", NoticeAction::Dismiss),
+                ],
+            }),
+            None => {}
+        }
+    }
+
+    /// Status-bar item for the base-game data.
+    fn game_data_status(&mut self, ui: &mut egui::Ui, t: &theme::Tokens) {
+        use crate::game_data::Status;
+        let (text, tip, color, clickable) = match (&self.game_data.status, &self.state.base) {
+            (Status::Loading(p), _) => {
+                ui.add(egui::Spinner::new().size(12.0).color(t.accent));
+                (p.clone(), "Reading the base game's units and abilities".to_owned(), t.text_dim, false)
+            }
+            (_, Some(b)) => (
+                format!("SC2 {} data", b.version),
+                format!(
+                    "{} placeable units and {} catalog entries from {}. Click to reload from another folder.",
+                    b.units().len(),
+                    b.len(),
+                    b.mods.join(", ")
+                ),
+                t.text_dim,
+                true,
+            ),
+            (Status::Failed(e), None) => ("No game data".to_owned(), e.clone(), t.warn, true),
+            (status, None) => {
+                let why = match status {
+                    Status::Missing(w) => format!("{w}. "),
+                    _ => String::new(),
+                };
+                (
+                    "No game data".to_owned(),
+                    format!("{why}Unit lists show common units only. Click to choose your StarCraft II folder."),
+                    t.text_dim,
+                    true,
+                )
+            }
+        };
+        let resp = ui
+            .add(egui::Label::new(RichText::new(text).small().color(color)).sense(if clickable {
+                egui::Sense::click()
+            } else {
+                egui::Sense::hover()
+            }))
+            .on_hover_text(tip);
+        if clickable && resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        if clickable && resp.clicked() {
+            self.queued.push(Command::LoadGameData);
         }
     }
 
@@ -781,6 +874,7 @@ impl StrataApp {
                 self.menu_cmd(ui, Command::FrameMap);
                 self.menu_cmd(ui, Command::ShowProblems);
                 ui.separator();
+                self.menu_cmd(ui, Command::LoadGameData);
                 self.menu_cmd(ui, Command::ConnectAi);
             });
             ui.menu_button("Help", |ui| {
@@ -1088,6 +1182,8 @@ impl StrataApp {
                 ui.add(egui::Spinner::new().size(12.0).color(t.accent));
                 ui.label(RichText::new(busy).small().color(t.text_dim));
             }
+            dot(ui, &t);
+            self.game_data_status(ui, &t);
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
@@ -1502,6 +1598,7 @@ impl eframe::App for StrataApp {
         crate::mcp_link::tick(&ctx, &mut self.state);
         self.poll_web(&ctx);
         self.handle_io();
+        self.handle_game_data();
         if let Some(then) = self.pending_then.take() {
             self.do_then(&ctx, then);
         }

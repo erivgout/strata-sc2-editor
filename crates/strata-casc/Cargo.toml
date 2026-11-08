@@ -1,0 +1,11 @@
+[package]
+name = "strata-casc"
+description = "Pure-Rust, wasm-compatible reader for the local CASC storage of an installed StarCraft II (MNDX root)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+miniz_oxide = "0.8"
+thiserror.workspace = true

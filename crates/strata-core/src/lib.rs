@@ -9,6 +9,7 @@
 //! - [`triggers`]: trigger library model; [`galaxy`] turns it into MapScript.galaxy
 //!   and lints Galaxy; [`trigger_lib`] describes the natives the editor offers.
 //! - [`catalog`]: generic GameData catalog entries (units, abilities, weapons...).
+//! - [`base_data`]: the base game's catalogs, read from the user's install.
 //! - [`catalog_schema`]: curated field types and descriptions for common classes.
 //! - [`strings`]: localized text keyed by locale.
 //! - [`brush`]: terrain brush strokes shared by viewport tools and MCP.
@@ -17,6 +18,7 @@
 //! - [`known`]: curated SC2 unit, doodad and texture ids for pickers.
 //! - [`validate`]: problems shown in the Problems panel.
 
+pub mod base_data;
 pub mod brush;
 pub mod catalog;
 pub mod catalog_schema;

@@ -3,13 +3,15 @@
 //! Three panes: catalog kinds on the left, a virtualized table of entries in
 //! the middle, and the selected entry's fields on the right. Own fields are
 //! editable; values inherited through `parent` are shown dimmed with where
-//! they come from. Every change is one undoable `Edit::Data`.
+//! they come from, falling through to the base game's catalogs once they are
+//! loaded from the user's install. Every change is one undoable `Edit::Data`.
 
 use egui::{
     Align, Button, Color32, Id, Key, KeyboardShortcut, Label, Layout, Modifiers, RichText, Sense,
     TextEdit, Ui,
 };
 use egui_extras::{Column, TableBuilder};
+use strata_core::base_data::BaseCatalog;
 use strata_core::catalog::{
     Catalog, CatalogEntry, CatalogIndex, CatalogKind, FieldKey, Reference, ResolvedField,
     SearchHit, XmlNode,
@@ -203,9 +205,10 @@ impl DataState {
         self.dialog_fresh = true;
     }
 
-    fn refresh(&mut self, doc: &MapDocument, rev: u64) {
+    fn refresh(&mut self, doc: &MapDocument, rev: u64, base: Option<&BaseCatalog>) {
         let cat = &doc.data;
-        let key = (rev, cat.entries.len(), fingerprint(cat));
+        let base_tag = base.map_or(0, |b| (b.len() as u64) << 32 | b.version.len() as u64);
+        let key = (rev, cat.entries.len(), fingerprint(cat).wrapping_add(base_tag));
         if self.cache.key != Some(key) {
             self.cache = Cache {
                 key: Some(key),
@@ -215,7 +218,7 @@ impl DataState {
             };
         }
         if self.cache.rows_kind != Some(self.kind) {
-            self.build_rows(cat);
+            self.build_rows(cat, base);
         }
         let ok = (self.sort, self.ascending, self.filter.clone());
         if self.cache.order_key.as_ref() != Some(&ok) {
@@ -230,7 +233,7 @@ impl DataState {
         }
     }
 
-    fn build_rows(&mut self, cat: &Catalog) {
+    fn build_rows(&mut self, cat: &Catalog, base: Option<&BaseCatalog>) {
         let keys: Vec<FieldKey> = schema::key_columns(self.kind)
             .iter()
             .map(|k| FieldKey::parse(k))
@@ -249,6 +252,9 @@ impl DataState {
                     .map(|k| {
                         idx.resolve_value(cat, i, k)
                             .map(|(v, src)| (v.to_owned(), src != i))
+                            .or_else(|| {
+                                base?.inherited_value(cat, i, k).map(|(v, _)| (v.to_owned(), true))
+                            })
                     })
                     .collect(),
             })
@@ -388,6 +394,8 @@ impl Pending {
 
 struct Cx<'a> {
     doc: &'a MapDocument,
+    /// The base game's catalogs, when loaded.
+    base: Option<&'a BaseCatalog>,
     ds: &'a mut DataState,
     selected: Option<usize>,
     tk: Tokens,
@@ -402,13 +410,14 @@ pub fn show(ui: &mut Ui, state: &mut EditorState) {
         .data_entry
         .filter(|&i| i < state.doc.data.entries.len());
 
+    let base = state.base.clone();
     let ds = &mut state.ui.data;
-    ds.refresh(&state.doc, rev);
+    ds.refresh(&state.doc, rev, base.as_deref());
     if selection != ds.seen_selection {
         if let Some(e) = selection.and_then(|i| state.doc.data.entries.get(i)) {
             if ds.kind != e.kind() {
                 ds.kind = e.kind();
-                ds.refresh(&state.doc, rev);
+                ds.refresh(&state.doc, rev, base.as_deref());
             }
             ds.scroll_to_selected = true;
         }
@@ -417,6 +426,7 @@ pub fn show(ui: &mut Ui, state: &mut EditorState) {
 
     let mut cx = Cx {
         doc: &state.doc,
+        base: base.as_deref(),
         ds,
         selected: selection,
         tk,
@@ -935,7 +945,7 @@ fn table(ui: &mut Ui, cx: &mut Cx) {
     // Refresh in case the kind changed earlier this frame.
     if cx.ds.cache.rows_kind != Some(cx.ds.kind) || cx.ds.cache.order_key.is_none() {
         let rev = cx.ds.cache.key.map(|k| k.0).unwrap_or(0);
-        cx.ds.refresh(cx.doc, rev);
+        cx.ds.refresh(cx.doc, rev, cx.base);
     }
     if cx.ds.cache.rows.is_empty() {
         empty_kind(ui, cx);
@@ -959,7 +969,7 @@ fn table(ui: &mut Ui, cx: &mut Cx) {
     });
     // Keep the cache in sync with the filter typed this frame.
     let rev = cx.ds.cache.key.map(|k| k.0).unwrap_or(0);
-    cx.ds.refresh(cx.doc, rev);
+    cx.ds.refresh(cx.doc, rev, cx.base);
 
     // Keyboard navigation.
     let order: Vec<usize> = cx.ds.ordered_indices().collect();
@@ -1284,6 +1294,23 @@ fn inspector(ui: &mut Ui, cx: &mut Cx, i: usize) {
     // Inheritance chain and derived entries.
     let chain = cat.parent_chain(i);
     let external = cat.external_root(i).map(str::to_owned);
+    let base_root = cx.base.and_then(|b| b.underlying(cat, i).map(|j| (b, j)));
+    // A map entry with no parent that shares a base entry's id edits it.
+    let modifies = external.is_none() && base_root.is_some_and(|(b, j)| {
+        let top = chain.last().copied().unwrap_or(i);
+        b.entries[j].id() == cat.entries[top].id()
+    });
+    if modifies {
+        if let Some((b, j)) = base_root {
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                hint(ui, &tk, "Modifies");
+                ui.label(b.entries[j].id())
+                    .on_hover_text(format!("Defined in {}.SC2Mod; this map changes it", b.origin_of(j)));
+                hint(ui, &tk, "(base game)");
+            });
+        }
+    }
     if !chain.is_empty() || external.is_some() {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
@@ -1304,9 +1331,25 @@ fn inspector(ui: &mut Ui, cx: &mut Cx, i: usize) {
                 if !chain.is_empty() {
                     hint(ui, &tk, "›");
                 }
-                ui.label(x)
-                    .on_hover_text("Defined by the base game or a dependency, not in this map");
-                hint(ui, &tk, "(base game)");
+                match (cx.base, base_root) {
+                    (_, Some((b, j))) => {
+                        let name = b.display_name(cat.entries[i].kind(), x).unwrap_or(x);
+                        let tip = format!("{name}: defined in {}.SC2Mod", b.origin_of(j));
+                        ui.label(x).on_hover_text(tip);
+                        hint(ui, &tk, "(base game)");
+                    }
+                    (Some(_), None) => {
+                        ui.label(RichText::new(x).color(tk.warn)).on_hover_text(
+                            "Not in this map or the base game's melee mods; it may come from another dependency",
+                        );
+                        hint(ui, &tk, "(not found)");
+                    }
+                    (None, None) => {
+                        ui.label(x)
+                            .on_hover_text("Defined by the base game or a dependency, not in this map");
+                        hint(ui, &tk, "(base game)");
+                    }
+                }
             }
         });
     }
@@ -1386,7 +1429,9 @@ fn fields(ui: &mut Ui, cx: &mut Cx, i: usize, external: Option<&str>) {
     let tk = cx.tk;
     let doc = cx.doc;
     let cat = &doc.data;
-    let resolved = cat.resolved_fields(i);
+    let mut resolved = cat.resolved_fields(i);
+    let own_count = resolved.len();
+    let base_sources = cx.base.map(|b| b.extend_resolved(cat, i, &mut resolved)).unwrap_or_default();
     if resolved.is_empty() {
         let text = match external {
             Some(p) => format!(
@@ -1402,14 +1447,16 @@ fn fields(ui: &mut Ui, cx: &mut Cx, i: usize, external: Option<&str>) {
             .spacing([8.0, 4.0])
             .min_col_width(60.0)
             .show(ui, |ui| {
-                for f in &resolved {
-                    field_row(ui, cx, i, f, external);
+                for (n, f) in resolved.iter().enumerate() {
+                    let base_src = n.checked_sub(own_count).and_then(|k| base_sources.get(k)).copied();
+                    field_row(ui, cx, i, f, external, base_src);
                     ui.end_row();
                 }
             });
-        if let Some(p) = external {
+        if let Some(p) = external.filter(|_| base_sources.is_empty()) {
             ui.add_space(4.0);
-            hint(ui, &tk, format!("Fields not listed come from {p}."));
+            let more = if cx.base.is_none() { " Load game data (Map menu) to see them." } else { "" };
+            hint(ui, &tk, format!("Fields not listed come from {p}.{more}"));
         }
     }
     ui.add_space(10.0);
@@ -1456,7 +1503,16 @@ fn def_hover(def: Option<&FieldDef>) -> Option<String> {
     })
 }
 
-fn field_row(ui: &mut Ui, cx: &mut Cx, i: usize, f: &ResolvedField, external: Option<&str>) {
+/// One field. `base_src` is the base-game entry that sets an inherited
+/// value that does not come from this map.
+fn field_row(
+    ui: &mut Ui,
+    cx: &mut Cx,
+    i: usize,
+    f: &ResolvedField,
+    external: Option<&str>,
+    base_src: Option<usize>,
+) {
     let tk = cx.tk;
     let doc = cx.doc;
     let cat = &doc.data;
@@ -1476,7 +1532,23 @@ fn field_row(ui: &mut Ui, cx: &mut Cx, i: usize, f: &ResolvedField, external: Op
     }
 
     ui.horizontal(|ui| {
-        if f.inherited {
+        if let (true, Some(j), Some(b)) = (f.inherited, base_src, cx.base) {
+            ui.label(
+                RichText::new(format!("from {} (base game)", b.entries[j].id()))
+                    .small()
+                    .color(tk.text_dim),
+            )
+            .on_hover_text(format!("Set by {} in {}.SC2Mod", b.entries[j].id(), b.origin_of(j)));
+            if ui
+                .small_button("Override")
+                .on_hover_text("Copy this value into this entry so you can change it")
+                .clicked()
+            {
+                let node = f.node.clone();
+                cx.out
+                    .modify(cat, i, format!("Override {label}"), |e| e.put(&f.key, node));
+            }
+        } else if f.inherited {
             let src = cat.entries[f.source].id().to_owned();
             if ui
                 .link(RichText::new(format!("from {src}")).small())
@@ -1513,11 +1585,16 @@ fn field_row(ui: &mut Ui, cx: &mut Cx, i: usize, f: &ResolvedField, external: Op
                     }
                 }
                 None => {
-                    let tip = match external {
-                        Some(x) => format!("Remove this field so the value comes from {x}"),
-                        None => "Remove this field".to_owned(),
+                    let from_base = cx.base.and_then(|b| b.inherited_value(cat, i, &f.key).map(|(v, j)| (v, b.entries[j].id())));
+                    let (button, tip) = match (from_base, external) {
+                        (Some((v, src)), _) => (
+                            "Reset",
+                            format!("Remove this override and use the base game value {v} from {src}"),
+                        ),
+                        (None, Some(x)) => ("Remove", format!("Remove this field so the value comes from {x}")),
+                        (None, None) => ("Remove", "Remove this field".to_owned()),
                     };
-                    if ui.small_button("Remove").on_hover_text(tip).clicked() {
+                    if ui.small_button(button).on_hover_text(tip).clicked() {
                         cx.out.modify(cat, i, format!("Remove {label}"), |e| {
                             e.remove(&f.key);
                         });
@@ -1760,12 +1837,28 @@ fn link_menu(ui: &mut Ui, cx: &mut Cx, id: Id, kind: CatalogKind) -> Option<Stri
         .of_kind(kind)
         .map(|(_, e)| (e.id().to_owned(), true))
         .collect();
-    for b in schema::base_ids(kind) {
-        if !cands.iter().any(|(c, _)| c == b) {
-            cands.push(((*b).to_owned(), false));
+    cands.retain(|(c, _)| ql.is_empty() || c.to_lowercase().contains(&ql));
+    let mut names: std::collections::HashMap<String, String> = Default::default();
+    match cx.base {
+        Some(b) => {
+            for j in b.search(&ql, Some(kind), 300) {
+                let id = b.entries[j].id();
+                if !cands.iter().any(|(c, _)| c == id) {
+                    cands.push((id.to_owned(), false));
+                    if let Some(n) = b.display_name(kind, id).filter(|n| *n != id) {
+                        names.insert(id.to_owned(), n.to_owned());
+                    }
+                }
+            }
+        }
+        None => {
+            for b in schema::base_ids(kind) {
+                if !cands.iter().any(|(c, _)| c == b) && (ql.is_empty() || b.to_lowercase().contains(&ql)) {
+                    cands.push(((*b).to_owned(), false));
+                }
+            }
         }
     }
-    cands.retain(|(c, _)| ql.is_empty() || c.to_lowercase().contains(&ql));
     cands.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| natural_cmp(&a.0, &b.0)));
     let mut picked = None;
     if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
@@ -1784,7 +1877,10 @@ fn link_menu(ui: &mut Ui, cx: &mut Cx, id: Id, kind: CatalogKind) -> Option<Stri
                 let text = if *local {
                     RichText::new(c)
                 } else {
-                    RichText::new(format!("{c}  · base game")).color(tk.text_dim)
+                    match names.get(c) {
+                        Some(n) => RichText::new(format!("{c}  · {n}")).color(tk.text_dim),
+                        None => RichText::new(format!("{c}  · base game")).color(tk.text_dim),
+                    }
                 };
                 if ui.selectable_label(false, text).clicked() {
                     picked = Some(c.clone());
@@ -1968,7 +2064,10 @@ fn add_field_named(cx: &mut Cx, i: usize, name: &str) {
         return;
     }
     let def = schema::field_def(e.class(), &key.name);
-    let inherited = cat.resolve(i, &key).map(|(n, _)| n.clone());
+    let inherited = cat.resolve(i, &key).map(|(n, _)| n.clone()).or_else(|| {
+        let b = cx.base?;
+        b.resolve(b.underlying(cat, i)?, &key).map(|(n, _)| n.clone())
+    });
     let node = match (inherited, def.map(|d| d.ty)) {
         (Some(n), _) => n,
         (None, Some(FieldType::Struct)) => XmlNode::new(&key.name),
@@ -2339,7 +2438,7 @@ fn dialogs(ctx: &egui::Context, cx: &mut Cx) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -2349,6 +2448,59 @@ mod tests {
         assert_eq!(v, ["Alpha", "Unit1", "unit2", "Unit10"]);
         assert_eq!(spaced("MyMarine2"), "My Marine2");
         assert_eq!(spaced("MySCV"), "My SCV");
+    }
+
+    /// A tiny synthetic base game (no Blizzard data).
+    pub(crate) fn sample_base() -> std::sync::Arc<BaseCatalog> {
+        let mut b = BaseCatalog::builder("0.0.0.1");
+        b.begin_mod("Liberty");
+        b.add_catalog(
+            "UnitData.xml",
+            br#"<Catalog>
+                <CUnit default="1"><Radius value="0.5"/></CUnit>
+                <CUnit id="Marine">
+                    <Race value="Terr"/><LifeMax value="45"/>
+                    <EditorCategories value="ObjectType:Unit,ObjectFamily:Melee"/>
+                </CUnit>
+                <CUnit id="MineralField">
+                    <EditorCategories value="ObjectType:Resource,ObjectFamily:Melee"/>
+                </CUnit>
+            </Catalog>"#,
+        )
+        .unwrap();
+        b.add_strings(b"Unit/Name/Marine=Marine\nUnit/Name/MineralField=Mineral Field\n");
+        std::sync::Arc::new(b.finish())
+    }
+
+    #[test]
+    fn base_game_values_show_through() {
+        let mut doc = MapDocument::new("Base", 32, 32);
+        let mut u = CatalogEntry::new("UnitData", "CUnit", "MyMarine", Some("Marine"));
+        u.set_field("Speed", "3");
+        let mut edit = CatalogEntry::new("UnitData", "CUnit", "MineralField", None);
+        edit.set_field("Radius", "1");
+        doc.data.entries = vec![u, edit];
+        let mut state = EditorState::new(doc);
+        state.base = Some(sample_base());
+
+        let base = state.base.clone().unwrap();
+        let mut fields = state.doc.data.resolved_fields(0);
+        let src = base.extend_resolved(&state.doc.data, 0, &mut fields);
+        let life = fields.iter().position(|f| f.key.name == "LifeMax").unwrap();
+        assert_eq!(fields[life].node.attr("value"), Some("45"));
+        assert_eq!(base.entries[src[life - 1]].id(), "Marine");
+
+        let ctx = egui::Context::default();
+        for sel in [Some(0), Some(1), None] {
+            state.selection.data_entry = sel;
+            let mut out = ctx.run_ui(Default::default(), |ui| {
+                egui::CentralPanel::default().show(ui, |ui| show(ui, &mut state));
+            });
+            out.textures_delta.clear();
+        }
+        // The table's key columns pick up base values too.
+        let row = state.ui.data.cache.rows.iter().find(|r| r.id == "MyMarine").unwrap();
+        assert!(row.cols.iter().flatten().any(|(v, inherited)| v == "45" && *inherited));
     }
 
     /// Drive every panel this module family owns through a few headless frames.
