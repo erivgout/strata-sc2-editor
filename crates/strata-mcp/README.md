@@ -107,7 +107,6 @@ counter-clockwise from east.
 | `terrain_stats` | Height, cliff, texture and pathing statistics for the map or a rect |
 | `sample_height` | Height, cliff level and pathing at points |
 | `add_texture_layer` | Add a texture layer (max 8) to paint with |
-| `set_water` | Set or remove the water plane |
 | `place_object` | Place a unit, doodad or point |
 | `move_object` | Move an object |
 | `set_object_property` | Change owner, facing, scale, name or type |

@@ -439,6 +439,27 @@ impl Archive {
         &self.data
     }
 
+    /// Number of live files the hash table points to that no known name
+    /// (from `(listfile)` or the MPQ bookkeeping files) reaches. Such files
+    /// can be read by nobody and would be dropped by a rebuild. Only the
+    /// classic hash table is inspected; HET-only archives report 0.
+    pub fn unlisted_count(&self) -> usize {
+        let Index::Classic(table) = &self.index else { return 0 };
+        let usable = |i: usize| {
+            self.blocks.get(i).is_some_and(|b| b.flags & FLAG_EXISTS != 0 && b.flags & FLAG_DELETE_MARKER == 0)
+        };
+        let live: std::collections::BTreeSet<usize> =
+            table.iter().map(|h| h.block as usize).filter(|&i| usable(i)).collect();
+        let known: std::collections::BTreeSet<usize> = self
+            .names
+            .iter()
+            .map(String::as_str)
+            .chain(["(listfile)", "(attributes)", "(signature)", "(user data)"])
+            .filter_map(|n| self.find(n))
+            .collect();
+        live.difference(&known).count()
+    }
+
     fn find(&self, name: &str) -> Option<usize> {
         let usable = |i: usize| {
             self.blocks

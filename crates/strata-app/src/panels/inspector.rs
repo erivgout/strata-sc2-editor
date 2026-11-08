@@ -290,9 +290,8 @@ pub fn sub_tool_picker(ui: &mut egui::Ui, state: &mut EditorState, compact: bool
         Mode::Pathing => {
             let flags = |ui: &mut egui::Ui| {
                 for (bit, label, tip) in [
+                    // Only this flag is written to .SC2Map files today.
                     (pathing::UNWALKABLE, "Unwalkable", "Ground units cannot path here"),
-                    (pathing::UNBUILDABLE, "Unbuildable", "Structures cannot be placed here"),
-                    (pathing::NO_FLY, "No fly", "Air units cannot fly here"),
                 ] {
                     let on = s.pathing_flags & bit != 0;
                     if ui.add(egui::Button::selectable(on, label)).on_hover_text(tip).clicked() {

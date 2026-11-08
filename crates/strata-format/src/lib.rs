@@ -470,6 +470,14 @@ fn is_mpq_internal(name: &str) -> bool {
 
 pub fn load_sc2map(bytes: Vec<u8>) -> Result<MapDocument, FormatError> {
     let archive = strata_mpq::Archive::from_bytes(bytes)?;
+    // Files missing from (listfile) can't be named, so a save would silently
+    // drop them. Refuse instead of losing data.
+    let unlisted = archive.unlisted_count();
+    if unlisted > 0 {
+        return Err(FormatError::Unsupported(format!(
+            "this archive has {unlisted} file(s) that are not in its (listfile), so Strata can't keep them when saving. Open and re-save the map in the StarCraft II editor first."
+        )));
+    }
     let mut files = FileMap::new();
     for name in archive.files() {
         if is_mpq_internal(&name) {

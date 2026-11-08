@@ -200,7 +200,7 @@ pathing sets (on: true) or clears `flags` on cells. Heights clamp to -16..64. Us
                 "seed": int("noise: random seed.", 0, u32::MAX as i64),
                 "layer": int("paint / erase: texture layer index.", 0, 7),
                 "level": int("cliff: cliff level 0..15.", 0, 15),
-                "flags": {"type": "array", "description": "pathing: which flags to set or clear.", "items": {"type": "string", "enum": ["unwalkable", "unbuildable", "no_fly"]}},
+                "flags": {"type": "array", "description": "pathing: which flags to set or clear.", "items": {"type": "string", "enum": ["unwalkable"]}},
                 "on": boolean("pathing: true sets the flags (default), false clears them."),
                 "passes": int("Repeat the stroke this many times (default 1).", 1, 50),
             }), &["tool"])),
@@ -216,9 +216,6 @@ pathing sets (on: true) or clears `flags` on cells. Heights clamp to -16..64. Us
                 "texture": string("Texture id, e.g. \"CharDirtDark\"."),
                 "fill": boolean("Cover the whole map with it (default false: starts empty)."),
             }), &["texture"])),
-        def("set_water", "Set water",
-            "Set the map's water plane height (-16..64; new maps have ground at 12), or remove water with height null.",
-            obj(json!({"height": {"type": ["number", "null"], "description": "Water height, or null for no water."}}), &["height"])),
 
         def("place_object", "Place object",
             format!("Place a unit, doodad or point. {xy} The z coordinate follows the terrain. Returns the new object's id. Unit types are SC2 catalog ids (Marine, SCV, Zergling, Hatchery, CommandCenter, MineralField, VespeneGeyser, XelNagaTower...); doodads are model ids (e.g. CharRock01)."),
@@ -661,9 +658,7 @@ fn brush_op(a: &Args) -> Result<Op, String> {
             for n in names {
                 flags |= match n.as_str() {
                     Some("unwalkable") => pathing::UNWALKABLE,
-                    Some("unbuildable") => pathing::UNBUILDABLE,
-                    Some("no_fly") => pathing::NO_FLY,
-                    _ => return Err(format!("unknown pathing flag {n}; use unwalkable, unbuildable, no_fly")),
+                    _ => return Err(format!("unknown pathing flag {n}; only \"unwalkable\" can be saved to .SC2Map files today")),
                 };
             }
             if flags == 0 {
@@ -855,14 +850,6 @@ pub fn call(s: &Strata, name: &str, args: &Value) -> Result<String, CallError> {
             texture: a.need_str("texture")?,
             fill: a.bool("fill")?.unwrap_or(false),
         }),
-        "set_water" => {
-            if !a.0.contains_key("height") {
-                return Err("\"height\" is required: a number, or null to remove water".into());
-            }
-            op(Op::SetWater {
-                height: a.f32("height")?,
-            })
-        }
 
         "place_object" => {
             let kind = a.choice("kind", &KINDS)?.unwrap_or(ObjectKind::Unit);
@@ -1256,9 +1243,6 @@ mod tests {
             json!({"tool": "paint", "layer": 1, "x": 30, "y": 30}),
         )
         .unwrap();
-        c("set_water", json!({"height": 10})).unwrap();
-        c("set_water", json!({"height": null})).unwrap();
-        assert!(c("set_water", json!({})).is_err());
 
         c(
             "create_region",

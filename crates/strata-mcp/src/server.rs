@@ -61,8 +61,6 @@ pub struct Strata {
     headless: Mutex<Headless>,
     bridge: Option<Arc<Bridge>>,
     live: LiveConfig,
-    /// Where the editor's map was last opened from / saved to by this server.
-    editor_path: Mutex<Option<PathBuf>>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -75,7 +73,6 @@ impl Strata {
             headless: Mutex::new(headless),
             bridge,
             live,
-            editor_path: Mutex::new(None),
         }
     }
 
@@ -170,9 +167,8 @@ impl Strata {
                 discard_changes,
             },
         )?;
-        match out.target {
-            Target::Headless => lock(&self.headless).path = Some(path.to_owned()),
-            Target::Editor => *lock(&self.editor_path) = Some(path.to_owned()),
+        if out.target == Target::Headless {
+            lock(&self.headless).path = Some(path.to_owned());
         }
         Ok(Outcome {
             target: out.target,
@@ -191,9 +187,6 @@ impl Strata {
                 discard_changes,
             },
         )?;
-        if out.target == Target::Editor {
-            *lock(&self.editor_path) = None;
-        }
         Ok(Outcome {
             target: out.target,
             value: summary,
@@ -212,7 +205,12 @@ impl Strata {
                 }
                 let doc: MapDocument = serde_json::from_value(out.value)
                     .map_err(|e| format!("the editor sent a map this server cannot read: {e}"))?;
-                (doc, lock(&self.editor_path).clone())
+                // The user can open another map in the editor at any time, so
+                // a remembered path may belong to a different map: require one.
+                if path.is_none() {
+                    return Err("pass path when saving the editor's map, e.g. \"C:/Maps/MyMap.SC2Map\" (Strata won't guess which file the open map belongs to)".into());
+                }
+                (doc, None)
             }
             Target::Headless => {
                 let h = lock(&self.headless);
@@ -226,7 +224,6 @@ impl Strata {
         let shown = absolute(&path).display().to_string();
         match target {
             Target::Editor => {
-                *lock(&self.editor_path) = Some(path.clone());
                 let _ = self.run(
                     "map_save",
                     LinkKind::Saved {

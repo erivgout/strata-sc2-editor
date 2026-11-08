@@ -368,6 +368,11 @@ impl Op {
                 shape,
                 falloff,
             } => {
+                if let BrushTool::Pathing { flags, .. } = tool {
+                    if flags & !crate::terrain::pathing::UNWALKABLE != 0 {
+                        return invalid("only the unwalkable pathing flag can be saved to .SC2Map files today");
+                    }
+                }
                 if points.is_empty() {
                     return invalid("brush needs at least one point, e.g. points [[32, 32]]");
                 }
@@ -1109,32 +1114,9 @@ impl Op {
                     json!({"layer": layer}),
                 )
             }
-            Op::SetWater { height } => {
-                if let Some(h) = height {
-                    if !(HEIGHT_RANGE.0..=HEIGHT_RANGE.1).contains(&h) {
-                        return invalid(format!(
-                            "water height must be {}..={}, got {h}",
-                            HEIGHT_RANGE.0, HEIGHT_RANGE.1
-                        ));
-                    }
-                }
-                let before = doc.terrain.water_height;
-                doc.terrain.water_height = height;
-                doc.dirty.terrain = true;
-                let label = if height.is_some() {
-                    "Set water height"
-                } else {
-                    "Remove water"
-                };
-                ok(
-                    label.into(),
-                    Edit::Water {
-                        before,
-                        after: height,
-                    },
-                    json!({}),
-                )
-            }
+            Op::SetWater { .. } => invalid(
+                "water can't be saved to .SC2Map files yet, so Strata refuses to change it rather than lose the edit",
+            ),
         }
     }
 }
@@ -1758,13 +1740,7 @@ mod tests {
         .to_string()
         .contains("maximum of 8"));
 
-        run_and_undo(&mut d, Op::SetWater { height: Some(9.0) });
-        assert_eq!(d.terrain.water_height, Some(9.0));
-        run_and_undo(&mut d, Op::SetWater { height: None });
-        assert!(Op::SetWater {
-            height: Some(100.0)
-        }
-        .run(&mut d)
-        .is_err());
+        assert!(Op::SetWater { height: Some(9.0) }.run(&mut d).is_err());
+        assert_eq!(d.terrain.water_height, None);
     }
 }
