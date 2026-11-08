@@ -237,7 +237,7 @@ pub const DOODADS: &[Known] = &[
     k("TarBubble", "Tar bubble"),
     k("TarSludge", "Tar sludge"),
     k("CaveEntrance", "Cave entrance"),
-    k("PipeGroundBig", "Ground pipe (big)"),
+    k("PipesLong", "Pipes (long)"),
     k("AlarmLight", "Alarm light"),
     k("CableLight", "Cable light"),
     k("XelNaga_EnergyStreaks", "Xel'Naga energy streaks"),

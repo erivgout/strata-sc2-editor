@@ -3189,12 +3189,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "strata-casc"
+version = "0.1.0"
+dependencies = [
+ "miniz_oxide 0.8.9",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "strata-core"
 version = "0.1.0"
 dependencies = [
  "glam",
+ "miniz_oxide 0.8.9",
  "serde",
  "serde_json",
+ "strata-casc",
  "thiserror 2.0.21",
 ]
 

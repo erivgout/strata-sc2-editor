@@ -419,6 +419,11 @@ impl<'a> Parser<'a> {
             } else if r.starts_with("<!--") {
                 self.pos += 4;
                 self.skip_until("-->", "A comment")?;
+            } else if r.starts_with("<?") {
+                // Processing instructions such as Blizzard's template
+                // `<?token id="abil" type="CAbilLink"?>`; dropped like comments.
+                self.pos += 2;
+                self.skip_until("?>", "The <? instruction")?;
             } else if r.starts_with("<![CDATA[") {
                 self.pos += 9;
                 let s = self.skip_until("]]>", "A CDATA section")?;
