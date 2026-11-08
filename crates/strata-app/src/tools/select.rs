@@ -9,7 +9,6 @@ use strata_core::regions::Region;
 use super::{ToolInput, ToolState};
 use crate::render::camera::View;
 use crate::state::EditorState;
-use crate::theme;
 
 pub(crate) enum Drag {
     /// Rubber-band selection from a viewport-local point.
@@ -20,18 +19,74 @@ pub(crate) enum Drag {
     Region { start: Vec2, circle: bool },
 }
 
+/// Approximate footprint radius (world units) of a known unit type: small
+/// infantry about half a cell, vehicles and large air units a cell or more,
+/// structures half their footprint.
+pub fn unit_radius(type_id: &str) -> Option<f32> {
+    let r = match type_id {
+        "SCV" | "MULE" | "Marine" | "Reaper" | "Ghost" | "Probe" | "Zealot" | "Sentry" | "Adept" | "HighTemplar"
+        | "DarkTemplar" | "Observer" | "Larva" | "Drone" | "Zergling" | "Baneling" | "Hydralisk" | "Infestor"
+        | "Queen" | "CreepTumorBurrowed" | "WidowMine" => 0.5,
+        "Marauder" | "Hellion" | "HellionTank" | "Cyclone" | "Stalker" | "Roach" | "Ravager" | "Immortal"
+        | "LurkerMP" | "SwarmHostMP" | "VikingFighter" | "VikingAssault" | "Medivac" | "Banshee" | "Raven"
+        | "Phoenix" | "Oracle" | "WarpPrism" | "Disruptor" | "Mutalisk" | "Corruptor" | "Viper" | "Overlord"
+        | "Overseer" => 0.75,
+        "SiegeTank" | "SiegeTankSieged" | "Archon" | "Colossus" | "Ultralisk" | "Liberator" | "VoidRay"
+        | "BroodLord" => 1.0,
+        "Thor" | "Battlecruiser" | "Carrier" | "Tempest" => 1.25,
+        "Mothership" => 1.5,
+        // 5x5 town halls.
+        "CommandCenter" | "OrbitalCommand" | "PlanetaryFortress" | "Nexus" | "Hatchery" | "Lair" | "Hive" => 2.5,
+        // 2x2 structures.
+        "SupplyDepot" | "SupplyDepotLowered" | "MissileTurret" | "SensorTower" | "Pylon" | "PhotonCannon"
+        | "ShieldBattery" | "DarkShrine" | "SpineCrawler" | "SporeCrawler" | "BarracksTechLab" | "BarracksReactor"
+        | "FactoryTechLab" | "FactoryReactor" | "StarportTechLab" | "StarportReactor" | "XelNagaTower" => 1.0,
+        // 3x3 structures and geysers.
+        "Barracks" | "EngineeringBay" | "Bunker" | "Factory" | "GhostAcademy" | "Starport" | "Armory"
+        | "FusionCore" | "Refinery" | "Gateway" | "WarpGate" | "Forge" | "CyberneticsCore" | "TwilightCouncil"
+        | "RoboticsFacility" | "Stargate" | "TemplarArchive" | "RoboticsBay" | "FleetBeacon" | "Assimilator"
+        | "Extractor" | "SpawningPool" | "EvolutionChamber" | "RoachWarren" | "BanelingNest" | "HydraliskDen"
+        | "LurkerDenMP" | "InfestationPit" | "Spire" | "GreaterSpire" | "NydusNetwork" | "UltraliskCavern" => 1.5,
+        id if id.contains("MineralField") => 1.0,
+        id if id.contains("Geyser") => 1.5,
+        id if id.starts_with("Unbuildable") => 1.0,
+        id if id.starts_with("Destructible") => {
+            if id.contains("Huge") {
+                3.0
+            } else if id.contains("6x6") {
+                2.5
+            } else {
+                2.0
+            }
+        }
+        _ => return None,
+    };
+    Some(r)
+}
+
 /// World radius used for picking and drawing an object.
 pub fn object_world_radius(o: &PlacedObject) -> f32 {
+    let s = o.scale.x.max(0.25);
     match o.kind {
-        ObjectKind::Unit => 0.75 * o.scale.x.max(0.25),
-        ObjectKind::Doodad => 0.6 * o.scale.x.max(0.25),
+        ObjectKind::Unit => unit_radius(&o.type_id).unwrap_or(0.75) * s,
+        ObjectKind::Doodad => 0.75 * s,
         ObjectKind::Point => 0.5,
+    }
+}
+
+/// Smallest on-screen radius (points) per kind, so markers stay readable
+/// when zoomed out.
+pub fn min_screen_radius(kind: ObjectKind) -> f32 {
+    match kind {
+        ObjectKind::Unit => 6.0,
+        ObjectKind::Doodad => 5.5,
+        ObjectKind::Point => 6.0,
     }
 }
 
 /// Screen radius (points) of an object at its depth.
 pub fn object_screen_radius(o: &PlacedObject, view: &View) -> f32 {
-    (object_world_radius(o) * view.points_per_unit(o.position)).clamp(4.0, 60.0)
+    (object_world_radius(o) * view.points_per_unit(o.position)).clamp(min_screen_radius(o.kind), 160.0)
 }
 
 /// Topmost object under a viewport-local point.
@@ -265,7 +320,7 @@ impl ToolState {
     pub(crate) fn paint_select(&self, painter: &egui::Painter, input: &ToolInput) {
         if let Some(Drag::Box { start, .. }) = &self.drag {
             let Some(end) = input.pointer else { return };
-            let tk = theme::tokens(painter.ctx());
+            let tk = crate::render::overlay::MAP;
             let r = egui::Rect::from_two_pos(input.to_screen(*start), input.to_screen(end));
             painter.rect_filled(r, 0.0, tk.accent.gamma_multiply(0.12));
             painter.rect_stroke(r, 0.0, egui::Stroke::new(1.0, tk.accent), egui::StrokeKind::Inside);
@@ -416,6 +471,32 @@ mod tests {
         commit_move(&mut s, before.clone(), None);
         s.undo();
         assert_eq!(s.doc.objects.objects, before);
+    }
+
+    #[test]
+    fn unit_sizes_follow_type() {
+        assert_eq!(unit_radius("Marine"), Some(0.5));
+        assert!(unit_radius("CommandCenter").unwrap() > unit_radius("Thor").unwrap());
+        assert_eq!(unit_radius("RichMineralField750"), Some(1.0));
+        assert_eq!(unit_radius("SomeCustomUnit"), None);
+        let o = PlacedObject::new(ObjectId(1), ObjectKind::Unit, "SomeCustomUnit", Vec3::ZERO);
+        assert_eq!(object_world_radius(&o), 0.75);
+    }
+
+    #[test]
+    fn markers_keep_a_minimum_screen_size() {
+        let o = PlacedObject::new(ObjectId(1), ObjectKind::Unit, "Marine", Vec3::new(64.0, 64.0, 8.0));
+        let far = crate::render::camera::Pose {
+            target: Vec3::new(64.0, 64.0, 8.0),
+            yaw: std::f32::consts::FRAC_PI_2,
+            pitch: 0.9,
+            distance: 400.0,
+        };
+        let v = View::new(&far, false, Vec2::new(800.0, 600.0));
+        assert_eq!(object_screen_radius(&o, &v), 6.0, "12px across when zoomed out");
+        let near = crate::render::camera::Pose { distance: 10.0, ..far };
+        let v = View::new(&near, false, Vec2::new(800.0, 600.0));
+        assert!(object_screen_radius(&o, &v) > 14.0, "grows with zoom");
     }
 
     #[test]

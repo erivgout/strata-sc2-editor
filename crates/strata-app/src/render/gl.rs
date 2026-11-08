@@ -11,6 +11,12 @@ use eframe::egui_glow;
 use glam::{Mat4, Vec3};
 use glow::HasContext as _;
 
+/// Direction toward the key light: from the west-north-west (upper left with
+/// the default north-up camera) 40 degrees above the horizon, so slopes facing
+/// the default camera still catch some light. Shared with the minimap so both
+/// read the same relief.
+pub const SUN: Vec3 = Vec3::new(-0.6943, 0.3237, 0.6428);
+
 /// Pending uploads queued by the UI thread, consumed by the paint callback.
 #[derive(Default)]
 pub struct Uploads {
@@ -34,6 +40,8 @@ pub struct FrameParams {
     pub eye: Vec3,
     pub map_size: [f32; 2],
     pub playable: [f32; 4],
+    /// Lowest and highest terrain height, for height shading.
+    pub height_range: [f32; 2],
     pub water: Option<f32>,
     pub show_grid: bool,
     pub show_contours: bool,
@@ -107,6 +115,7 @@ struct Gpu {
     u_eye: Option<glow::UniformLocation>,
     u_map: Option<glow::UniformLocation>,
     u_playable: Option<glow::UniformLocation>,
+    u_height: Option<glow::UniformLocation>,
     u_toggles: Option<glow::UniformLocation>,
     u_path: Option<glow::UniformLocation>,
     u_bounds_color: Option<glow::UniformLocation>,
@@ -160,6 +169,8 @@ uniform vec3 u_sun;
 uniform vec3 u_eye;
 uniform vec2 u_map;
 uniform vec4 u_playable;
+// Terrain height range (min, max) for height shading.
+uniform vec2 u_height;
 // x: grid, y: contours, z: cliff tint, w: pathing overlay
 uniform vec4 u_toggles;
 uniform sampler2D u_path;
@@ -212,23 +223,35 @@ void main() {
 
     // Procedural grain so flat textures do not read as plastic.
     float g = vnoise(v_world.xy * 1.3) * 0.6 + vnoise(v_world.xy * 5.1) * 0.4;
-    base *= 0.9 + 0.2 * g;
+    base *= 0.92 + 0.16 * g;
 
     if (u_toggles.z > 0.5) {
         base = mix(base, cliff_color(floor(v_cliff + 0.5)), 0.6);
     }
 
-    // Steep faces turn darker and greyer, like exposed rock.
+    // Slope tint: gentle slopes pick up a little warmth, steep faces turn
+    // cooler and greyer, like exposed rock.
     float slope = 1.0 - n.z;
-    float rock = smoothstep(0.22, 0.7, slope);
     float lum = dot(base, vec3(0.299, 0.587, 0.114));
-    base = mix(base, vec3(lum) * vec3(0.78, 0.76, 0.74), rock * 0.7);
+    float rock = smoothstep(0.18, 0.62, slope);
+    base = mix(base, base * vec3(1.06, 1.0, 0.92), smoothstep(0.02, 0.18, slope) * (1.0 - rock));
+    base = mix(base, vec3(lum * 1.08) * vec3(0.97, 0.96, 0.95), rock * 0.6);
 
-    // Hemisphere ambient + sun.
+    // Subtle height shading: valleys a touch darker, peaks a touch lighter.
+    float span = u_height.y - u_height.x;
+    if (span > 0.5) {
+        float h01 = clamp((v_world.z - u_height.x) / span, 0.0, 1.0);
+        base *= mix(0.86, 1.08, h01);
+    }
+
+    // Key light from the upper left at ~40 degrees, cool sky / warm ground
+    // hemisphere fill. The fill keeps faces turned away from the sun readable.
     float hemi = n.z * 0.5 + 0.5;
-    vec3 ambient = mix(vec3(0.30, 0.28, 0.27), vec3(0.56, 0.61, 0.70), hemi);
-    float diff = max(dot(n, u_sun), 0.0);
-    vec3 lit = base * (ambient + vec3(1.0, 0.95, 0.86) * diff * 0.78);
+    vec3 ambient = mix(vec3(0.30, 0.25, 0.21), vec3(0.47, 0.52, 0.61), hemi);
+    float ndl = dot(n, u_sun);
+    // Slightly wrapped diffuse softens the terminator without flattening relief.
+    float diff = clamp((ndl + 0.1) / 1.1, 0.0, 1.0);
+    vec3 lit = base * (ambient + vec3(1.0, 0.94, 0.84) * diff * 0.86);
 
     if (u_toggles.y > 0.5) {
         float minor = grid_line(v_world.z, 1.0);
@@ -238,10 +261,17 @@ void main() {
     }
 
     if (u_toggles.x > 0.5) {
-        float gl = max(grid_line(v_world.x, 1.0), grid_line(v_world.y, 1.0));
-        float density = max(fwidth(v_world.x), fwidth(v_world.y));
-        float fade = clamp(1.6 - density * 6.0, 0.0, 1.0);
-        lit = mix(lit, vec3(1.0), gl * 0.22 * fade);
+        // Cell lines fade out as cells shrink on screen (zoomed out or far
+        // away); every eighth line stays a little longer to keep scale.
+        float density = max(max(fwidth(v_world.x), fwidth(v_world.y)), 1e-4);
+        float cell_px = 1.0 / density;
+        float minor = max(grid_line(v_world.x, 1.0), grid_line(v_world.y, 1.0));
+        float major = max(grid_line(v_world.x / 8.0, 1.0), grid_line(v_world.y / 8.0, 1.0));
+        float minor_a = 0.10 * smoothstep(5.0, 14.0, cell_px);
+        float major_a = 0.16 * smoothstep(8.0, 24.0, cell_px * 8.0);
+        // Lines thin out on steep faces, where they would bunch into a mesh.
+        float a = max(minor * minor_a, major * major_a) * (1.0 - 0.75 * rock);
+        lit = mix(lit, vec3(1.0, 0.98, 0.95), a);
     }
 
     if (u_toggles.w > 0.5) {
@@ -428,6 +458,7 @@ impl Gpu {
                 u_eye: u(terrain, "u_eye"),
                 u_map: u(terrain, "u_map"),
                 u_playable: u(terrain, "u_playable"),
+                u_height: u(terrain, "u_height"),
                 u_toggles: u(terrain, "u_toggles"),
                 u_path: u(terrain, "u_path"),
                 u_bounds_color: u(terrain, "u_bounds_color"),
@@ -662,8 +693,9 @@ impl Gpu {
             if self.index_count > 0 {
                 gl.use_program(Some(self.terrain));
                 gl.uniform_matrix_4_f32_slice(self.u_view_proj.as_ref(), false, &vp_cols);
-                let sun = Vec3::new(-0.45, -0.35, 0.82).normalize();
+                let sun = SUN;
                 gl.uniform_3_f32(self.u_sun.as_ref(), sun.x, sun.y, sun.z);
+                gl.uniform_2_f32(self.u_height.as_ref(), p.height_range[0], p.height_range[1]);
                 gl.uniform_3_f32(self.u_eye.as_ref(), p.eye.x, p.eye.y, p.eye.z);
                 gl.uniform_2_f32(self.u_map.as_ref(), p.map_size[0], p.map_size[1]);
                 let [a, b, c, d] = p.playable;

@@ -27,94 +27,224 @@ pub fn player_color(doc: &MapDocument, player: u8, tk: &Tokens) -> Color32 {
         .unwrap_or(tk.text_dim)
 }
 
+/// Tokens for anything drawn on the terrain. The terrain looks the same in
+/// both themes, so markers, rings and labels on it use the dark palette
+/// (bright strokes, dark halos) everywhere; panels keep the user's theme.
+pub const MAP: Tokens = crate::theme::DARK;
+
+/// Dark halo behind markers and strokes so they read on any terrain.
+const HALO: Color32 = Color32::from_rgba_premultiplied(8, 11, 15, 200);
+/// Fill for doodad markers: a neutral stone, distinct from player colors.
+const DOODAD_FILL: Color32 = Color32::from_rgb(0xC9, 0xC0, 0xAE);
+/// Hover ring.
+const HOVER: Color32 = Color32::from_rgb(0xF2, 0xF5, 0xF8);
+
+/// Markers grow labels once they are this big on screen (radius, points).
+pub const LABEL_MIN_RADIUS: f32 = 14.0;
+
+/// How to draw one object marker.
+#[derive(Debug, Clone, Copy)]
+pub struct MarkerStyle {
+    pub color: Color32,
+    pub selected: bool,
+    pub hovered: bool,
+    /// Placement preview: translucent, always labeled.
+    pub ghost: bool,
+}
+
+/// A label a marker would like to show; placed later so labels never overlap.
+#[derive(Debug, Clone)]
+pub struct Label {
+    /// Top-center of the label.
+    pub at: Pos2,
+    pub text: String,
+    /// Higher wins when labels collide.
+    pub priority: f32,
+}
+
 fn to_screen(origin: Pos2, p: Vec2) -> Pos2 {
     origin + egui::vec2(p.x, p.y)
 }
 
-/// Draw one placed object. `highlight` draws a ring (selection / hover).
-#[allow(clippy::too_many_arguments)]
+/// Black or white, whichever reads better on `c`.
+fn contrast_on(c: Color32) -> Color32 {
+    let l = 0.299 * c.r() as f32 + 0.587 * c.g() as f32 + 0.114 * c.b() as f32;
+    if l > 150.0 {
+        Color32::from_rgb(0x10, 0x14, 0x1A)
+    } else {
+        Color32::WHITE
+    }
+}
+
+/// Screen direction an object faces (unit vector), following perspective.
+fn facing(view: &View, o: &PlacedObject, c: Pos2, origin: Pos2) -> egui::Vec2 {
+    let dir = Vec3::new(o.rotation.cos(), o.rotation.sin(), 0.0);
+    let d = view.project(o.position + dir).map(|t| to_screen(origin, t) - c).unwrap_or(egui::vec2(1.0, 0.0));
+    if d.length() > 1e-3 {
+        d.normalized()
+    } else {
+        egui::vec2(1.0, 0.0)
+    }
+}
+
+/// Text for an object's label: its name, else the known display name, else the id.
+pub fn object_label(o: &PlacedObject) -> &str {
+    if !o.name.is_empty() {
+        return &o.name;
+    }
+    strata_core::known::unit_name(&o.type_id)
+        .or(strata_core::known::doodad_name(&o.type_id))
+        .unwrap_or(o.display_name())
+}
+
+/// Draw one placed object and return the label it wants, if any.
+///
+/// Units are discs in the owner's color sized to their footprint (never
+/// smaller than 12px across), with a dark outline and a facing notch.
+/// Doodads are stone diamonds turned to their rotation; points are flags,
+/// start locations are rings.
 pub fn draw_object(
     painter: &egui::Painter,
     view: &View,
     origin: Pos2,
     o: &PlacedObject,
-    color: Color32,
-    highlight: Option<Color32>,
-    label: bool,
+    style: MarkerStyle,
     tk: &Tokens,
-) {
-    let Some(s) = view.project(o.position) else { return };
+) -> Option<Label> {
+    let s = view.project(o.position)?;
     let c = to_screen(origin, s);
     let r = object_screen_radius(o, view);
-    let ppu = view.points_per_unit(o.position);
-    let outline = Stroke::new(1.0, tk.bg_deep.gamma_multiply(0.85));
+    let alpha = if style.ghost { 0.55 } else { 1.0 };
+    let halo = Stroke::new(1.5, HALO.gamma_multiply(alpha));
+    let accent = tk.accent;
+    let ring = |painter: &egui::Painter, rr: f32| {
+        if style.selected {
+            painter.circle_stroke(c, rr, Stroke::new(4.0, HALO.gamma_multiply(0.6)));
+            painter.circle_stroke(c, rr, Stroke::new(2.0, accent));
+        } else if style.hovered {
+            painter.circle_stroke(c, rr, Stroke::new(3.5, HALO.gamma_multiply(0.5)));
+            painter.circle_stroke(c, rr, Stroke::new(1.5, HOVER.gamma_multiply(0.9)));
+        }
+    };
+    let mut label_offset = r + 4.0;
     match o.kind {
         ObjectKind::Unit => {
-            painter.circle_filled(c, r, color.gamma_multiply(0.55));
-            painter.circle_stroke(c, r, Stroke::new(1.5, color));
-            // Facing tick, projected so it points the right way in perspective.
-            let dir = Vec3::new(o.rotation.cos(), o.rotation.sin(), 0.0);
-            let tip =
-                view.project(o.position + dir * (r / ppu.max(1e-3)) * 1.35).map(|t| to_screen(origin, t)).unwrap_or(c);
-            painter.line_segment([c, tip], Stroke::new(2.0, color));
-            if let Some(h) = highlight {
-                painter.circle_stroke(c, r + 3.0, Stroke::new(2.0, h));
+            let d = facing(view, o, c, origin);
+            // Big markers (structures, close zoom) go translucent so the
+            // terrain under them stays visible.
+            let fill_a = if r < 18.0 { 0.92 } else { 0.55 };
+            let fill = style.color.gamma_multiply(fill_a * alpha);
+            // Facing notch: a small wedge just outside the rim.
+            let n = egui::vec2(-d.y, d.x);
+            let nub = (r * 0.45).clamp(3.5, 9.0);
+            let wedge = vec![c + d * (r + nub), c + d * (r - 1.0) + n * nub * 0.85, c + d * (r - 1.0) - n * nub * 0.85];
+            painter.add(egui::Shape::convex_polygon(wedge, style.color.gamma_multiply(alpha), halo));
+            painter.circle_filled(c, r, fill);
+            if r >= 18.0 {
+                painter.circle_stroke(c, r - 1.5, Stroke::new(1.5, style.color.gamma_multiply(alpha)));
             }
-            if label && ppu > 16.0 && !o.type_id.is_empty() {
-                let name = strata_core::known::unit_name(&o.type_id).unwrap_or(o.display_name());
-                text(painter, c + egui::vec2(0.0, r + 8.0), name, tk);
-            }
+            painter.circle_stroke(c, r, halo);
+            // Facing tick inside the disc.
+            let tick = if r < 18.0 { contrast_on(style.color) } else { style.color };
+            painter.line_segment([c + d * (r * 0.2), c + d * (r - 1.0)], Stroke::new(1.75, tick.gamma_multiply(alpha)));
+            ring(painter, r + 3.5);
+            label_offset = r + 5.0;
         }
         ObjectKind::Doodad => {
-            let d = r * 0.85;
-            let pts =
-                vec![c + egui::vec2(0.0, -d), c + egui::vec2(d, 0.0), c + egui::vec2(0.0, d), c + egui::vec2(-d, 0.0)];
-            painter.add(egui::Shape::convex_polygon(pts, color.gamma_multiply(0.75), outline));
-            if let Some(h) = highlight {
-                let e = d + 3.0;
-                let ring = vec![
-                    c + egui::vec2(0.0, -e),
-                    c + egui::vec2(e, 0.0),
-                    c + egui::vec2(0.0, e),
-                    c + egui::vec2(-e, 0.0),
-                ];
-                painter.add(egui::Shape::closed_line(ring, Stroke::new(2.0, h)));
-            }
-            if label && ppu > 22.0 {
-                text(painter, c + egui::vec2(0.0, d + 8.0), o.display_name(), tk);
+            let d = facing(view, o, c, origin);
+            let n = egui::vec2(-d.y, d.x);
+            let pts = vec![c + d * r, c + n * r, c - d * r, c - n * r];
+            let fill = DOODAD_FILL.gamma_multiply(if r < 18.0 { 0.9 } else { 0.5 } * alpha);
+            painter.add(egui::Shape::convex_polygon(pts, fill, halo));
+            if style.selected || style.hovered {
+                let e = r + 4.0;
+                let ring_pts = vec![c + d * e, c + n * e, c - d * e, c - n * e];
+                let (w, col) = if style.selected { (2.0, accent) } else { (1.5, HOVER) };
+                painter
+                    .add(egui::Shape::closed_line(ring_pts.clone(), Stroke::new(w + 2.0, HALO.gamma_multiply(0.55))));
+                painter.add(egui::Shape::closed_line(ring_pts, Stroke::new(w, col)));
             }
         }
         ObjectKind::Point => {
             let start = o.type_id == strata_core::known::POINT_START_LOCATION;
-            let col = highlight.unwrap_or(if start { tk.ok } else { color });
-            if start {
-                painter.circle_stroke(c, 7.0, Stroke::new(2.0, col));
-                painter.circle_filled(c, 2.5, col);
+            let col = if style.selected {
+                accent
+            } else if start {
+                tk.ok
             } else {
-                let top = c + egui::vec2(0.0, -16.0);
+                style.color
+            };
+            if start {
+                let rr = r.max(8.0);
+                painter.circle_stroke(c, rr, Stroke::new(4.5, HALO));
+                painter.circle_stroke(c, rr, Stroke::new(2.5, col));
+                painter.circle_filled(c, 3.0, col);
+                painter.circle_stroke(c, 3.0, Stroke::new(1.0, HALO));
+                if style.hovered && !style.selected {
+                    painter.circle_stroke(c, rr + 3.5, Stroke::new(1.5, HOVER));
+                }
+                label_offset = rr + 5.0;
+            } else {
+                let top = c + egui::vec2(0.0, -18.0);
+                painter.line_segment([c, top], Stroke::new(3.5, HALO));
                 painter.line_segment([c, top], Stroke::new(1.5, col));
-                let flag = vec![top, top + egui::vec2(10.0, 3.5), top + egui::vec2(0.0, 7.0)];
-                painter.add(egui::Shape::convex_polygon(flag, col, Stroke::NONE));
-                painter.circle_filled(c, 2.0, col);
-            }
-            if label && (ppu > 3.0 || highlight.is_some()) {
-                let at = if start { c + egui::vec2(0.0, 15.0) } else { c + egui::vec2(14.0, -12.0) };
-                let align = if start { egui::Align2::CENTER_CENTER } else { egui::Align2::LEFT_CENTER };
-                text_aligned(painter, at, align, o.display_name(), tk);
+                let flag = vec![top, top + egui::vec2(11.0, 4.0), top + egui::vec2(0.0, 8.0)];
+                painter.add(egui::Shape::convex_polygon(flag, col, Stroke::new(1.0, HALO)));
+                painter.circle_filled(c, 2.5, col);
+                painter.circle_stroke(c, 2.5, Stroke::new(1.0, HALO));
+                ring(painter, 7.0);
+                label_offset = 8.0;
             }
         }
     }
+    let point_label = o.kind == ObjectKind::Point && view.points_per_unit(o.position) > 3.0;
+    let wants = style.ghost || style.selected || style.hovered || point_label || r > LABEL_MIN_RADIUS;
+    if !wants || o.type_id.is_empty() && o.name.is_empty() {
+        return None;
+    }
+    let priority = if style.selected {
+        3000.0
+    } else if style.hovered || style.ghost {
+        2000.0
+    } else if o.kind == ObjectKind::Point {
+        1000.0 + r
+    } else {
+        r
+    };
+    Some(Label { at: c + egui::vec2(0.0, label_offset), text: object_label(o).to_owned(), priority })
 }
 
+/// Place labels highest priority first, skipping any that would overlap one
+/// already placed or run off `clip`.
+pub fn draw_labels(painter: &egui::Painter, mut labels: Vec<Label>, clip: egui::Rect, tk: &Tokens) {
+    labels.sort_by(|a, b| b.priority.total_cmp(&a.priority));
+    let font = egui::FontId::proportional(12.0);
+    let mut taken: Vec<egui::Rect> = Vec::new();
+    for l in labels {
+        let galley = painter.layout_no_wrap(l.text, font.clone(), tk.text);
+        let pad = egui::vec2(5.0, 1.0);
+        let size = galley.size() + pad * 2.0;
+        let rect = egui::Rect::from_min_size(l.at - egui::vec2(size.x * 0.5, 0.0), size);
+        if !clip.contains_rect(rect) || taken.iter().any(|t| t.intersects(rect)) {
+            continue;
+        }
+        taken.push(rect.expand(2.0));
+        painter.rect_filled(rect, 4.0, tk.bg_deep.gamma_multiply(0.82));
+        painter.galley(rect.min + pad, galley, tk.text);
+    }
+}
+
+/// A free-standing label (regions, cameras): a quiet pill centered on `at`.
 fn text(painter: &egui::Painter, at: Pos2, s: &str, tk: &Tokens) {
     text_aligned(painter, at, egui::Align2::CENTER_CENTER, s, tk);
 }
 
 fn text_aligned(painter: &egui::Painter, at: Pos2, align: egui::Align2, s: &str, tk: &Tokens) {
-    let font = egui::FontId::proportional(12.0);
-    // Cheap shadow for legibility over bright terrain.
-    painter.text(at + egui::vec2(1.0, 1.0), align, s, font.clone(), tk.bg_deep);
-    painter.text(at, align, s, font, tk.text);
+    let galley = painter.layout_no_wrap(s.to_owned(), egui::FontId::proportional(12.0), tk.text);
+    let pad = egui::vec2(5.0, 1.0);
+    let rect = align.anchor_size(at, galley.size() + pad * 2.0);
+    painter.rect_filled(rect, 4.0, tk.bg_deep.gamma_multiply(0.72));
+    painter.galley(rect.min + pad, galley, tk.text);
 }
 
 /// Boundary of a shape sampled roughly every `step` world units.
@@ -321,30 +451,45 @@ pub fn draw_document(
         draw_camera(painter, view, origin, t, c, color, tk);
     }
 
-    // Labels only when few enough objects are on screen to stay readable.
-    let on_screen: Vec<&PlacedObject> = doc
+    // Doodads first so units and points sit on top; selected and hovered
+    // objects last so their rings are never covered.
+    let mut on_screen: Vec<&PlacedObject> = doc
         .objects
         .objects
         .iter()
         .filter(|o| view.project(o.position).is_some_and(|s| cull.contains(to_screen(origin, s))))
         .collect();
-    let labels = on_screen.len() <= 400;
+    let rank = |o: &PlacedObject| {
+        let lift = if state.selection.objects.contains(&o.id) || hovered == Some(o.id) { 10 } else { 0 };
+        lift + match o.kind {
+            ObjectKind::Doodad => 0,
+            ObjectKind::Unit => 1,
+            ObjectKind::Point => 2,
+        }
+    };
+    on_screen.sort_by_key(|o| rank(o));
+    // Only selected / hovered objects keep labels when the view is crowded.
+    let crowded = on_screen.len() > 400;
+    let mut labels = Vec::new();
     for o in on_screen {
         let selected = state.selection.objects.contains(&o.id);
-        let color = match o.kind {
-            ObjectKind::Unit => player_color(doc, o.player, tk),
-            ObjectKind::Doodad => tk.text_dim,
-            ObjectKind::Point => tk.text,
+        let style = MarkerStyle {
+            color: match o.kind {
+                ObjectKind::Unit => player_color(doc, o.player, tk),
+                ObjectKind::Doodad => DOODAD_FILL,
+                ObjectKind::Point => tk.text,
+            },
+            selected,
+            hovered: hovered == Some(o.id),
+            ghost: false,
         };
-        let highlight = if selected {
-            Some(tk.accent)
-        } else if hovered == Some(o.id) {
-            Some(tk.text)
-        } else {
-            None
-        };
-        draw_object(painter, view, origin, o, color, highlight, labels, tk);
+        if let Some(l) = draw_object(painter, view, origin, o, style, tk) {
+            if !crowded || selected || style.hovered {
+                labels.push(l);
+            }
+        }
     }
+    draw_labels(painter, labels, rect, tk);
 }
 
 #[cfg(test)]

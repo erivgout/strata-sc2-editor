@@ -30,7 +30,8 @@ pub fn terrain_image(t: &Terrain) -> egui::ColorImage {
     let colors: Vec<[f32; 3]> = t.layers.iter().map(|l| texture_color(&l.texture).map(|c| c as f32 / 255.0)).collect();
     let (lo, hi) = t.min_max_height();
     let span = (hi - lo).max(1.0);
-    let sun = glam::Vec3::new(-0.45, -0.35, 0.82).normalize();
+    // Same key light as the 3D view so relief reads the same way.
+    let sun = crate::render::gl::SUN;
     let mut pixels = Vec::with_capacity((w * h) as usize);
     for row in 0..h {
         let y = (h - 1 - row) * step;
@@ -45,8 +46,8 @@ pub fn terrain_image(t: &Terrain) -> egui::ColorImage {
                 }
             }
             let n = t.normal_at_vertex(x, y);
-            let light = 0.55 + 0.6 * n.dot(sun).max(0.0);
-            let hgt = 0.8 + 0.35 * ((t.heights[vi] - lo) / span);
+            let light = 0.42 + 0.9 * n.dot(sun).max(0.0);
+            let hgt = 0.86 + 0.22 * ((t.heights[vi] - lo) / span);
             let mut rgb = c.map(|v| v * light * hgt);
             if let Some(wz) = t.water_height {
                 if t.heights[vi] < wz {
@@ -113,7 +114,8 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState) {
     let pb = state.doc.info.playable;
     let play =
         Rect::from_two_pos(to_px(Vec2::new(pb[0] as f32, pb[1] as f32)), to_px(Vec2::new(pb[2] as f32, pb[3] as f32)));
-    let shade = tk.bg_deep.gamma_multiply(0.55);
+    // Darken (in both themes) like the 3D view does outside the bounds.
+    let shade = Color32::from_black_alpha(120);
     for r in [
         Rect::from_min_max(rect.min, Pos2::new(rect.max.x, play.min.y)),
         Rect::from_min_max(Pos2::new(rect.min.x, play.max.y), rect.max),
@@ -126,8 +128,9 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState) {
     }
     painter.rect_stroke(play, 0.0, Stroke::new(1.0, tk.text_dim), egui::StrokeKind::Middle);
 
-    // Objects.
-    let dot = (rect.width() / mw * 0.9).clamp(1.5, 3.5);
+    // Objects, with a dark rim so they read on any terrain.
+    let dot = (rect.width() / mw * 0.9).clamp(2.0, 3.5);
+    let rim = Stroke::new(1.0, Color32::from_black_alpha(160));
     for o in &state.doc.objects.objects {
         let p = to_px(o.position.truncate());
         let selected = state.selection.objects.contains(&o.id);
@@ -141,13 +144,17 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState) {
                 ObjectKind::Point => tk.text,
             }
         };
-        painter.circle_filled(p, if selected { dot + 1.0 } else { dot }, c);
+        let r = if selected { dot + 1.0 } else { dot };
+        painter.circle_filled(p, r, c);
+        painter.circle_stroke(p, r + 0.5, rim);
     }
 
-    // Camera footprint.
+    // Camera footprint, clipped to the map image (far corners of a low
+    // camera land well beyond the map).
     if let Some(fp) = state.ui.viewport.footprint {
         let pts: Vec<Pos2> = fp.iter().map(|p| to_px(*p)).collect();
-        painter.add(egui::Shape::closed_line(pts, Stroke::new(1.5, tk.text)));
+        let clipped = painter.with_clip_rect(rect);
+        clipped.add(egui::Shape::closed_line(pts, Stroke::new(1.5, tk.text)));
     }
 
     if let Some(p) = response.interact_pointer_pos() {

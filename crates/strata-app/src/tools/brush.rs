@@ -6,7 +6,6 @@ use strata_core::terrain::Terrain;
 
 use super::{CliffOp, SculptTool, ToolInput, ToolSettings, ToolState};
 use crate::state::{EditorState, Mode};
-use crate::theme;
 
 /// Height tools apply this fraction of the brush strength per dab, so a
 /// stroke at spacing radius/4 builds up at a controllable rate.
@@ -207,7 +206,7 @@ impl ToolState {
 
     pub(crate) fn paint_brush(&self, painter: &egui::Painter, state: &EditorState, input: &ToolInput) {
         let Some(c) = input.hover else { return };
-        let tk = theme::tokens(painter.ctx());
+        let tk = crate::render::overlay::MAP;
         let b = &state.brush;
         let color = if self.stroke.is_some() { tk.accent } else { tk.text };
         let shadow = egui::Stroke::new(3.0, tk.bg_deep.gamma_multiply(0.7));
