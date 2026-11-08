@@ -8,6 +8,7 @@
 //! - [`regions`]: regions and cameras.
 //! - [`triggers`]: trigger library model; [`galaxy`] turns it into MapScript.galaxy.
 //! - [`catalog`]: generic GameData catalog entries (units, abilities, weapons...).
+//! - [`catalog_schema`]: curated field types and descriptions for common classes.
 //! - [`strings`]: localized text keyed by locale.
 //! - [`brush`]: terrain brush strokes shared by viewport tools and MCP.
 //! - [`ops`]: serializable document operations (the MCP / command API).
@@ -16,6 +17,7 @@
 
 pub mod brush;
 pub mod catalog;
+pub mod catalog_schema;
 pub mod document;
 pub mod galaxy;
 pub mod history;
