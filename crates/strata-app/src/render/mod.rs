@@ -5,17 +5,20 @@
 //! - [`mesh`]: CPU mesh, texture palette and dirty-row tracking.
 //! - [`gl`]: shaders, buffers and the egui paint callback.
 //! - [`overlay`]: objects, regions and cameras drawn with the egui painter.
+//! - [`textures`]: the game's terrain textures behind each texture layer.
 
 pub mod camera;
 pub mod gl;
 pub mod mesh;
 pub mod overlay;
 pub mod pick;
+pub mod textures;
 
 use strata_core::terrain::{Terrain, VertexRect};
 
 use self::gl::{FullUpload, SharedHandle};
 use self::mesh::TerrainMesh;
+use self::textures::TerrainTextures;
 
 /// Keeps the GPU copy of the terrain in step with the document.
 #[derive(Default)]
@@ -23,6 +26,7 @@ pub struct TerrainRenderer {
     pub shared: SharedHandle,
     mesh: Option<TerrainMesh>,
     revision: Option<u64>,
+    pub textures: TerrainTextures,
 }
 
 impl TerrainRenderer {
@@ -80,6 +84,13 @@ impl TerrainRenderer {
         if pathing || resized {
             up.pathing = Some((t.width, t.height, t.pathing.clone()));
         }
+    }
+
+    /// Fetch the terrain textures that arrived and queue their upload.
+    /// Returns the shader's per-layer parameters.
+    pub fn prepare_textures(&mut self, assets: &crate::assets::Assets, t: &Terrain) -> [[f32; 4]; 8] {
+        let Ok(mut s) = self.shared.lock() else { return [[0.0; 4]; 8] };
+        self.textures.update(assets, t, &mut s.uploads.layers)
     }
 
     pub fn error(&self) -> Option<String> {

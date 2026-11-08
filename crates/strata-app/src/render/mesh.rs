@@ -3,14 +3,17 @@
 
 use strata_core::terrain::{Terrain, VertexRect};
 
-/// One terrain vertex as uploaded to the GPU (28 bytes).
+/// One terrain vertex as uploaded to the GPU (36 bytes).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Vertex {
     pub pos: [f32; 3],
     pub normal: [f32; 3],
-    /// Blended texture color (sRGB) in rgb; cliff level * 16 in alpha.
+    /// Blended placeholder color (sRGB) in rgb; cliff level * 16 in alpha.
     pub color: [u8; 4],
+    /// Effective weight of each texture layer (0..=255, summing to ~255),
+    /// for blending the real terrain textures in the shader.
+    pub weights: [u8; 8],
 }
 
 /// Deterministic display color for a terrain texture id. Without Blizzard's
@@ -146,6 +149,7 @@ impl TerrainMesh {
             for x in r.x0..r.x1 {
                 let vi = t.vertex_index(x, y);
                 let w = t.blended_weights(vi);
+                let weights = w.map(|x| (x * 255.0).round().clamp(0.0, 255.0) as u8);
                 let mut c = [0.0f32; 3];
                 for (li, col) in self.layer_colors.iter().enumerate() {
                     let wi = w[li];
@@ -165,6 +169,7 @@ impl TerrainMesh {
                         c[2].round().clamp(0.0, 255.0) as u8,
                         t.cliff_levels[vi].min(15) * 16,
                     ],
+                    weights,
                 };
             }
         }
@@ -298,8 +303,20 @@ mod tests {
     use strata_core::brush::{Brush, BrushTool, Stroke};
 
     #[test]
-    fn vertex_is_28_bytes() {
-        assert_eq!(std::mem::size_of::<Vertex>(), 28);
+    fn vertex_is_36_bytes() {
+        assert_eq!(std::mem::size_of::<Vertex>(), 36);
+    }
+
+    #[test]
+    fn weights_follow_layers() {
+        let mut t = Terrain::new(4, 4);
+        let n = t.heights.len();
+        let mut w = vec![0u8; n];
+        w[t.vertex_index(2, 2)] = 255;
+        t.layers.push(strata_core::terrain::TextureLayer { texture: "Grass".into(), weights: w });
+        let m = TerrainMesh::build(&t);
+        assert_eq!(m.vertices[t.vertex_index(2, 2)].weights[..2], [0, 255]);
+        assert_eq!(m.vertices[0].weights[..2], [255, 0]);
     }
 
     #[test]

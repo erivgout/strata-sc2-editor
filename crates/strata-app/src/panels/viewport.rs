@@ -98,6 +98,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState) {
     if new_doc {
         state.ui.viewport.framed_for = Some(key);
         frame_map(state, true);
+        debug_view(state);
     } else if resized {
         // Keep an untouched auto-framed view fitted while the panel resizes.
         let vs = &state.ui.viewport;
@@ -172,6 +173,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState) {
         }
         vs.renderer.prepare(&state.doc.terrain, state.history.revision(), stroke_rect, force);
     }
+    let layers = state.ui.viewport.renderer.prepare_textures(&state.assets, &state.doc.terrain);
 
     // Terrain.
     let painter = ui.painter_at(rect);
@@ -195,6 +197,8 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState) {
         unbuildable: rgba(overlay::MAP.warn),
         nofly: rgba(overlay::MAP.text),
         water_color: [0.16, 0.36, 0.52, 1.0],
+        layers,
+        tex_scale: crate::render::textures::REPEATS_PER_CELL,
     };
     painter.add(gl::callback(vs.renderer.shared.clone(), rect, params));
     if let Some(err) = vs.renderer.error() {
@@ -428,6 +432,34 @@ pub fn frame_map(state: &mut EditorState, instant: bool) {
     vs.auto_framed = Some(cam.goal);
 }
 
+/// `STRATA_VIEW="x,y,distance,pitch°,yaw°"` (native): start every map from
+/// this camera, for checking rendering against the game. Missing values
+/// keep the framed view's.
+fn debug_view(state: &mut EditorState) {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Ok(v) = std::env::var("STRATA_VIEW") {
+        let n: Vec<f32> = v.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+        let t = &state.doc.terrain;
+        let cam = &mut state.ui.viewport.camera;
+        if let [x, y, ..] = n[..] {
+            cam.goal.target = Vec3::new(x, y, t.sample_height(x, y));
+        }
+        if let Some(d) = n.get(2) {
+            cam.goal.distance = *d;
+        }
+        if let Some(p) = n.get(3) {
+            cam.goal.pitch = p.to_radians();
+        }
+        if let Some(y) = n.get(4) {
+            cam.goal.yaw = y.to_radians();
+        }
+        cam.snap();
+        state.ui.viewport.auto_framed = None;
+    }
+    #[cfg(target_arch = "wasm32")]
+    let _ = state;
+}
+
 /// Frame the selected objects, region or camera.
 pub fn frame_selection(state: &mut EditorState) {
     let mut lo = Vec2::splat(f32::MAX);
@@ -539,9 +571,35 @@ fn toolbar(ctx: &egui::Context, id: egui::Id, rect: egui::Rect, state: &mut Edit
                     {
                         frame_map(state, false);
                     }
+                    textures_note(ui, state, tk);
                 });
             });
         });
+}
+
+/// Says why the terrain shows placeholder colors instead of the game's
+/// textures, when it does.
+fn textures_note(ui: &mut egui::Ui, state: &EditorState, tk: &Tokens) {
+    let assets = &state.assets;
+    let textures = &state.ui.viewport.renderer.textures;
+    if textures.any_textured() || state.doc.terrain.layers.is_empty() {
+        return;
+    }
+    let (text, tip) = if let Some(problem) = assets.problem() {
+        ("Placeholder colors", problem)
+    } else if textures.pending() {
+        ("Loading textures…", "Reading the terrain textures from your StarCraft II install.".to_owned())
+    } else if assets.available() {
+        return;
+    } else {
+        (
+            "Placeholder colors",
+            "Terrain shows placeholder colors. Map → Load game data… reads the real textures from your StarCraft II install."
+                .to_owned(),
+        )
+    };
+    ui.separator();
+    ui.label(egui::RichText::new(text).small().color(tk.text_dim)).on_hover_text(tip);
 }
 
 /// Brush HUD layouts, from roomiest to most compact.

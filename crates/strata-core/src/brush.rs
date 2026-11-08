@@ -99,7 +99,22 @@ pub struct Brush {
 
 impl Default for Brush {
     fn default() -> Self {
-        Self { tool: BrushTool::Raise, shape: BrushShape::Circle, falloff: Falloff::Smooth, radius: 6.0, strength: 0.35 }
+        Self { tool: BrushTool::Raise, shape: BrushShape::Circle, falloff: Falloff::Smooth, radius: 6.0, strength: 0.25 }
+    }
+}
+
+impl Brush {
+    /// Falloff weight of the vertex (or cell, `per_cell`) at `x, y` for a
+    /// dab at `center`; 0 outside the brush.
+    fn weight_at(&self, center: glam::Vec2, x: u32, y: u32, per_cell: bool) -> f32 {
+        let off = if per_cell { 0.5 } else { 0.0 };
+        let r = self.radius.max(0.5);
+        let d = glam::Vec2::new(x as f32 + off, y as f32 + off) - center;
+        let t = match self.shape {
+            BrushShape::Circle => d.length() / r,
+            BrushShape::Square => d.x.abs().max(d.y.abs()) / r,
+        };
+        if t > 1.0 { 0.0 } else { self.falloff.weight(t) }
     }
 }
 
@@ -127,15 +142,7 @@ pub fn dab(terrain: &mut Terrain, brush: &Brush, center: glam::Vec2) -> VertexRe
         return rect;
     }
 
-    let weight_at = |x: u32, y: u32| -> f32 {
-        let p = glam::Vec2::new(x as f32 + off, y as f32 + off);
-        let d = p - center;
-        let t = match brush.shape {
-            BrushShape::Circle => d.length() / r,
-            BrushShape::Square => d.x.abs().max(d.y.abs()) / r,
-        };
-        if t > 1.0 { 0.0 } else { brush.falloff.weight(t) }
-    };
+    let weight_at = |x: u32, y: u32| brush.weight_at(center, x, y, per_cell);
 
     let s = brush.strength.clamp(0.0, 1.0);
     match brush.tool {
@@ -254,11 +261,32 @@ pub struct Stroke {
     brush: Brush,
     before: Terrain,
     rect: VertexRect,
+    /// Raise / Lower: how far one stroke may move a vertex from its height
+    /// when the stroke began, at full brush weight.
+    height_cap: Option<f32>,
+    /// Per vertex: the cap times the highest brush weight it has seen this
+    /// stroke (so a stroke shapes a hill following the falloff).
+    allowance: Vec<f32>,
 }
 
 impl Stroke {
     pub fn begin(terrain: &Terrain, brush: Brush) -> Self {
-        Self { brush, before: terrain.clone(), rect: VertexRect { x0: 0, y0: 0, x1: 0, y1: 0 } }
+        Self {
+            brush,
+            before: terrain.clone(),
+            rect: VertexRect { x0: 0, y0: 0, x1: 0, y1: 0 },
+            height_cap: None,
+            allowance: Vec::new(),
+        }
+    }
+
+    /// Limit Raise / Lower to `cap` units per stroke: heights approach the
+    /// start height plus the cap (shaped by the falloff) instead of growing
+    /// without bound while the button is held, so a stroke makes a hill, not
+    /// a spike. Paint another stroke to go higher.
+    pub fn with_height_cap(mut self, cap: f32) -> Self {
+        self.height_cap = Some(cap.max(0.0));
+        self
     }
 
     pub fn brush(&self) -> &Brush {
@@ -268,6 +296,26 @@ impl Stroke {
     /// Apply a dab and return the rect touched by it, for incremental remeshing.
     pub fn dab(&mut self, terrain: &mut Terrain, center: glam::Vec2) -> VertexRect {
         let r = dab(terrain, &self.brush, center);
+        let sign = match self.brush.tool {
+            BrushTool::Raise => 1.0,
+            BrushTool::Lower => -1.0,
+            _ => 0.0,
+        };
+        if let (Some(cap), true) = (self.height_cap, sign != 0.0) {
+            if self.allowance.len() != terrain.heights.len() {
+                self.allowance = vec![0.0; terrain.heights.len()];
+            }
+            for y in r.y0..r.y1 {
+                for x in r.x0..r.x1 {
+                    let i = terrain.vertex_index(x, y);
+                    let a = &mut self.allowance[i];
+                    *a = a.max(cap * self.brush.weight_at(center, x, y, false));
+                    let limit = self.before.heights[i] + sign * *a;
+                    let h = &mut terrain.heights[i];
+                    *h = if sign > 0.0 { h.min(limit.max(self.before.heights[i])) } else { h.max(limit.min(self.before.heights[i])) };
+                }
+            }
+        }
         self.rect = self.rect.union(&r);
         r
     }
@@ -317,6 +365,45 @@ mod tests {
         assert_ne!(doc.terrain.heights, original);
         edit.apply(&mut doc, false);
         assert_eq!(doc.terrain.heights, original);
+    }
+
+    #[test]
+    fn capped_raise_makes_a_hill_not_a_spike() {
+        let mut t = Terrain::new(32, 32);
+        let i = t.vertex_index(16, 16);
+        let h0 = t.heights[i];
+        let b = Brush { radius: 4.0, strength: 1.0, ..Default::default() };
+        let mut s = Stroke::begin(&t, b).with_height_cap(3.0);
+        for _ in 0..200 {
+            s.dab(&mut t, glam::Vec2::new(16.0, 16.0));
+        }
+        assert!((t.heights[i] - (h0 + 3.0)).abs() < 1e-4, "center reaches the cap: {}", t.heights[i] - h0);
+        let j = t.vertex_index(18, 16);
+        let rise = t.heights[j] - h0;
+        assert!(rise > 0.5 && rise < 3.0, "slopes follow the falloff: {rise}");
+        // Moving the brush keeps the higher allowance already reached.
+        s.dab(&mut t, glam::Vec2::new(20.0, 16.0));
+        assert!((t.heights[i] - (h0 + 3.0)).abs() < 1e-4);
+        // An uncapped stroke keeps climbing.
+        let mut u = Terrain::new(32, 32);
+        let mut s = Stroke::begin(&u, b);
+        for _ in 0..200 {
+            s.dab(&mut u, glam::Vec2::new(16.0, 16.0));
+        }
+        assert!(u.heights[i] - h0 > 30.0);
+    }
+
+    #[test]
+    fn capped_lower_digs_down_only() {
+        let mut t = Terrain::new(16, 16);
+        let i = t.vertex_index(8, 8);
+        let h0 = t.heights[i];
+        let b = Brush { tool: BrushTool::Lower, radius: 3.0, strength: 1.0, ..Default::default() };
+        let mut s = Stroke::begin(&t, b).with_height_cap(2.0);
+        for _ in 0..50 {
+            s.dab(&mut t, glam::Vec2::new(8.0, 8.0));
+        }
+        assert!((t.heights[i] - (h0 - 2.0)).abs() < 1e-4);
     }
 
     #[test]

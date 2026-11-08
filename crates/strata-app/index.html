@@ -119,6 +119,7 @@
         if ("showDirectoryPicker" in window) {
           return window.showDirectoryPicker({ id: "strata-sc2", mode: "read" }).then(function (h) {
             sc2.handle = h; sc2.files = null; sc2.dirs = new Map();
+            sc2Remember(h);
             return h.name;
           }, function (e) {
             if (e && e.name === "AbortError") return null;
@@ -144,6 +145,35 @@
           input.addEventListener("cancel", function () { resolve(null); });
           input.click();
         });
+      };
+      // The picked folder's handle is kept in IndexedDB so a later visit can
+      // reopen it for game assets without asking, where the browser still
+      // grants read access (Chrome/Edge "allow on every visit").
+      function sc2Db() {
+        return new Promise(function (resolve, reject) {
+          const req = indexedDB.open("strata", 1);
+          req.onupgradeneeded = function () { req.result.createObjectStore("handles"); };
+          req.onsuccess = function () { resolve(req.result); };
+          req.onerror = function () { reject(req.error); };
+        });
+      }
+      function sc2Remember(h) {
+        sc2Db().then(function (db) {
+          db.transaction("handles", "readwrite").objectStore("handles").put(h, "sc2");
+        }).catch(function () {});
+      }
+      window.strataSc2Restore = async function () {
+        if (!("indexedDB" in window) || !("showDirectoryPicker" in window)) return null;
+        const db = await sc2Db();
+        const h = await new Promise(function (resolve) {
+          const req = db.transaction("handles").objectStore("handles").get("sc2");
+          req.onsuccess = function () { resolve(req.result || null); };
+          req.onerror = function () { resolve(null); };
+        });
+        if (!h || !h.queryPermission) return null;
+        if ((await h.queryPermission({ mode: "read" })) !== "granted") return null;
+        sc2.handle = h; sc2.files = null; sc2.dirs = new Map();
+        return h.name;
       };
       // Directory handle for a relative path, matching names case-insensitively.
       async function sc2Dir(parts) {

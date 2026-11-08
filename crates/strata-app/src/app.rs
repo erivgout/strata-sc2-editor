@@ -334,7 +334,14 @@ impl StrataApp {
             game_data: Default::default(),
         };
         app.game_data.start(&cc.egui_ctx);
-        if let Some(rec) = crate::io::restore_autosave() {
+        // STRATA_OPEN=<map>: open a map on start (native; used to check
+        // rendering against real maps).
+        #[cfg(not(target_arch = "wasm32"))]
+        let open_on_start = std::env::var("STRATA_OPEN").ok().map(|path| app.io.open_path(&cc.egui_ctx, path));
+        #[cfg(target_arch = "wasm32")]
+        let open_on_start: Option<()> = None;
+        let restored = if open_on_start.is_some() { None } else { crate::io::restore_autosave() };
+        if let Some(rec) = restored {
             app.state.load(rec.doc, rec.file_name);
             // Mark the restored map as unsaved so the guard and title show it.
             app.state
@@ -1599,6 +1606,9 @@ impl eframe::App for StrataApp {
         self.poll_web(&ctx);
         self.handle_io();
         self.handle_game_data();
+        if let Some(src) = self.game_data.take_assets() {
+            self.state.assets.attach(src, &ctx);
+        }
         if let Some(then) = self.pending_then.take() {
             self.do_then(&ctx, then);
         }
