@@ -61,6 +61,25 @@ What works today:
 
 Screenshots are coming.
 
+## Download
+
+**Windows:** download `strata-v<version>-windows-x64.exe` from the
+[latest release](https://github.com/erivgout/strata-sc2-editor/releases/latest)
+and run it. No installer or Visual C++ runtime is needed. Windows may warn
+that the file is from an unknown publisher (it isn't code-signed yet): choose
+**More info → Run anyway**.
+
+Strata checks for new versions when it starts (and from **Help → Check for
+updates…**). When one is available it asks first; **Update now** downloads
+it, verifies it against the release's SHA-256 checksum, and finishes the
+update when you restart or quit.
+
+`strata-mcp-v<version>-windows-x64.exe` is the MCP server for AI assistants
+(see [AI assistants](#ai-assistants-mcp)).
+
+To publish a release: bump `version` in `Cargo.toml`, push to `main`, then
+run `./scripts/release.ps1 -Version <version> -Notes "…"`.
+
 ## Build and run
 
 You need a recent stable Rust toolchain (1.85 or newer).
