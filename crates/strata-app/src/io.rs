@@ -145,7 +145,12 @@ impl Io {
 
     /// Show the open dialog and load the chosen map.
     pub fn open(&mut self, ctx: &egui::Context) {
-        self.busy = Some("Choosing a map…".into());
+        // Browsers do not always report a cancelled file picker, so the web
+        // build shows no busy state while the picker is open.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.busy = Some("Choosing a map…".into());
+        }
         #[cfg(not(target_arch = "wasm32"))]
         self.send_from_worker(ctx, || match block_on(open_dialog().pick_file()) {
             Some(h) => {
