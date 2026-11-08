@@ -151,7 +151,7 @@ pub fn validate(doc: &MapDocument) -> Vec<Problem> {
         .objects
         .objects
         .iter()
-        .filter(|o| o.type_id == "StartLocation")
+        .filter(|o| o.kind == ObjectKind::Point && o.type_id == "StartLoc")
         .count();
     let starts = starts_from_players.max(starts_from_objects);
     if !playing.is_empty() && starts < playing.len() {
