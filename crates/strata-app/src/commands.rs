@@ -7,7 +7,7 @@
 use egui::{Key, KeyboardShortcut, Modifiers};
 
 use crate::panels::Tab;
-use crate::state::Mode;
+use crate::state::{Mode, Workspace};
 use crate::theme::{self, ThemePref};
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -25,6 +25,8 @@ pub enum Command {
     OpenPalette,
     ShowShortcuts,
     SetMode(Mode),
+    /// Switch to a workspace (Ctrl+1..Ctrl+4).
+    Workspace(Workspace),
     FocusTab(Tab),
     Theme(ThemePref),
     ResetLayout,
@@ -47,6 +49,15 @@ const CMD_SHIFT: Modifiers = Modifiers {
     mac_cmd: false,
     command: true,
 };
+
+fn workspace_key(w: Workspace) -> Key {
+    match w {
+        Workspace::Map => Key::Num1,
+        Workspace::Triggers => Key::Num2,
+        Workspace::Data => Key::Num3,
+        Workspace::Text => Key::Num4,
+    }
+}
 
 fn mode_key(m: Mode) -> Key {
     match m.shortcut() {
@@ -78,11 +89,12 @@ impl Command {
             Command::OpenPalette => "Search commands…".into(),
             Command::ShowShortcuts => "Keyboard shortcuts".into(),
             Command::SetMode(m) => format!("{} mode", m.label()),
+            Command::Workspace(w) => format!("{} workspace", w.label()),
             Command::FocusTab(t) => format!("Show {}", t.title()),
             Command::Theme(ThemePref::Dark) => "Use dark theme".into(),
             Command::Theme(ThemePref::Light) => "Use light theme".into(),
             Command::Theme(ThemePref::System) => "Match system theme".into(),
-            Command::ResetLayout => "Reset panel layout".into(),
+            Command::ResetLayout => "Reset workspace layout".into(),
             Command::ConnectAi => "Connect an AI client (MCP)…".into(),
             Command::FrameMap => "Frame the whole map".into(),
             Command::ShowProblems => "Check map for problems".into(),
@@ -104,6 +116,7 @@ impl Command {
             | Command::OpenRecent(_) => "File",
             Command::Undo | Command::Redo => "Edit",
             Command::SetMode(_) => "Mode",
+            Command::Workspace(_) => "Workspace",
             Command::FocusTab(_) => "Panel",
             Command::Theme(_) | Command::ResetLayout | Command::OpenPalette => "View",
             Command::FrameMap | Command::ShowProblems => "Map",
@@ -134,12 +147,16 @@ impl Command {
             Command::SetMode(Mode::Units) => "place",
             Command::SetMode(Mode::Doodads) => "props decoration place",
             Command::SetMode(Mode::Points) => "markers start location",
+            Command::Workspace(Workspace::Map) => "terrain viewport switch layout",
+            Command::Workspace(Workspace::Triggers) => "script galaxy events switch layout",
+            Command::Workspace(Workspace::Data) => "catalog units abilities switch layout",
+            Command::Workspace(Workspace::Text) => "strings localization switch layout",
             Command::FocusTab(Tab::Strings) => "strings localization",
             Command::FocusTab(Tab::Script) => "galaxy code",
             Command::FocusTab(Tab::Mcp) => "mcp ai claude",
             Command::FocusTab(Tab::MapProps) => "info players settings",
             Command::Theme(_) => "appearance color mode",
-            Command::ResetLayout => "panels dock restore default",
+            Command::ResetLayout => "panels dock restore default workspace",
             Command::ConnectAi => "mcp claude assistant link disconnect",
             Command::FrameMap => "zoom fit camera center",
             Command::ShowProblems => "validate errors warnings",
@@ -160,6 +177,7 @@ impl Command {
             Command::OpenPalette => ks(Modifiers::COMMAND, Key::K),
             Command::ShowShortcuts => ks(Modifiers::NONE, Key::F1),
             Command::SetMode(m) => ks(Modifiers::NONE, mode_key(*m)),
+            Command::Workspace(w) => ks(Modifiers::COMMAND, workspace_key(*w)),
             _ => return None,
         })
     }
@@ -191,6 +209,7 @@ pub fn all(cx: &Context<'_>) -> Vec<Command> {
     v.extend([Command::Save, Command::SaveAs, Command::ExportProject]);
     v.extend(cx.recent_files.iter().cloned().map(Command::OpenRecent));
     v.extend([Command::Undo, Command::Redo]);
+    v.extend(Workspace::ALL.map(Command::Workspace));
     v.extend(Mode::ALL.map(Command::SetMode));
     v.extend(Tab::ALL.map(Command::FocusTab));
     v.extend(ThemePref::ALL.map(Command::Theme));
@@ -222,6 +241,7 @@ fn shortcut_commands() -> Vec<Command> {
         Command::OpenPalette,
         Command::ShowShortcuts,
     ];
+    v.extend(Workspace::ALL.map(Command::Workspace));
     v.extend(Mode::ALL.map(Command::SetMode));
     v
 }
@@ -693,7 +713,7 @@ impl ShortcutsOverlay {
             return;
         }
         let t = theme::tokens(ctx);
-        let groups: [(&str, Vec<(String, String)>); 4] = [
+        let groups: [(&str, Vec<(String, String)>); 5] = [
             (
                 "File",
                 [
@@ -727,6 +747,19 @@ impl ShortcutsOverlay {
                     ),
                     ("Keyboard shortcuts".into(), "F1".into()),
                 ],
+            ),
+            (
+                "Workspaces",
+                Workspace::ALL
+                    .iter()
+                    .map(|w| {
+                        let c = Command::Workspace(*w);
+                        (
+                            w.label().to_owned(),
+                            ctx.format_shortcut(&c.shortcut().unwrap()),
+                        )
+                    })
+                    .collect(),
             ),
             (
                 "Modes",
@@ -801,6 +834,20 @@ mod tests {
         assert!(a > b);
         assert_eq!(ia, vec![0, 5]);
         assert!(fuzzy_match("xyz", "Save map").is_none());
+    }
+
+    #[test]
+    fn shortcuts_are_unique() {
+        let cmds = shortcut_commands();
+        for (i, a) in cmds.iter().enumerate() {
+            for b in &cmds[i + 1..] {
+                assert_ne!(a.shortcut(), b.shortcut(), "{a:?} and {b:?}");
+            }
+        }
+        // Workspaces use Ctrl+digit; plain digits stay mode keys.
+        let ws = Command::Workspace(Workspace::Triggers).shortcut().unwrap();
+        assert_eq!(ws.modifiers, Modifiers::COMMAND);
+        assert!(!Command::Workspace(Workspace::Data).yields_to_text());
     }
 
     #[test]

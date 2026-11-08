@@ -76,6 +76,59 @@ impl Mode {
     }
 }
 
+/// A full-window arrangement of panels for one kind of work, chosen in the
+/// menu bar. Each workspace keeps its own dock layout.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub enum Workspace {
+    #[default]
+    Map,
+    Triggers,
+    Data,
+    Text,
+}
+
+impl Workspace {
+    pub const ALL: [Workspace; 4] = [
+        Workspace::Map,
+        Workspace::Triggers,
+        Workspace::Data,
+        Workspace::Text,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Workspace::Map => "Map",
+            Workspace::Triggers => "Triggers",
+            Workspace::Data => "Data",
+            Workspace::Text => "Text",
+        }
+    }
+
+    /// The panel the workspace is built around.
+    pub fn main_tab(self) -> panels::Tab {
+        match self {
+            Workspace::Map => panels::Tab::Viewport,
+            Workspace::Triggers => panels::Tab::Triggers,
+            Workspace::Data => panels::Tab::Data,
+            Workspace::Text => panels::Tab::Strings,
+        }
+    }
+
+    /// The workspace a panel belongs to, if it has a home of its own.
+    pub fn home_of(tab: panels::Tab) -> Option<Workspace> {
+        use panels::Tab;
+        match tab {
+            Tab::Viewport => Some(Workspace::Map),
+            Tab::Triggers | Tab::Script => Some(Workspace::Triggers),
+            Tab::Data => Some(Workspace::Data),
+            Tab::Strings => Some(Workspace::Text),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Selection {
     pub objects: BTreeSet<ObjectId>,
@@ -165,7 +218,12 @@ impl EditorState {
     /// Replace the open document (after New / Open).
     pub fn load(&mut self, doc: MapDocument, file_name: Option<String>) {
         let ui = std::mem::take(&mut self.ui);
-        *self = Self { mode: self.mode, brush: self.brush, ui, ..Self::new(doc) };
+        *self = Self {
+            mode: self.mode,
+            brush: self.brush,
+            ui,
+            ..Self::new(doc)
+        };
         self.file_name = file_name;
         self.history.mark_saved();
     }
@@ -177,7 +235,8 @@ impl EditorState {
 
     /// Apply and record an edit.
     pub fn commit(&mut self, label: impl Into<String>, edit: Edit) {
-        self.history.commit(&mut self.doc, label, Origin::User, edit);
+        self.history
+            .commit(&mut self.doc, label, Origin::User, edit);
     }
 
     /// Run a serializable op (command palette, MCP) and record it.
@@ -220,7 +279,11 @@ impl EditorState {
     }
 
     pub fn toast(&mut self, kind: ToastKind, text: impl Into<String>) {
-        self.toasts.push(Toast { kind, text: text.into(), ttl: 3.5 });
+        self.toasts.push(Toast {
+            kind,
+            text: text.into(),
+            ttl: 3.5,
+        });
     }
 
     pub fn request(&mut self, a: AppAction) {
@@ -238,7 +301,11 @@ impl EditorState {
 
     pub fn title(&self) -> String {
         let name = self.file_name.as_deref().unwrap_or(&self.doc.info.name);
-        let star = if self.history.is_modified() { " •" } else { "" };
+        let star = if self.history.is_modified() {
+            " •"
+        } else {
+            ""
+        };
         format!("{name}{star} — Strata")
     }
 }
