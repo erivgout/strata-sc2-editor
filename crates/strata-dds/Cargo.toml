@@ -1,0 +1,10 @@
+[package]
+name = "strata-dds"
+description = "DDS texture decoding (BC1-BC5 and uncompressed) to RGBA8, wasm-compatible"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+texture2ddecoder = "0.1.2"
+thiserror.workspace = true

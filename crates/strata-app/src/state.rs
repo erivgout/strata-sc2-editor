@@ -198,6 +198,8 @@ pub struct EditorState {
     pub ui: PanelStates,
     /// The base game's catalogs, once read from the user's install.
     pub base: Option<Arc<BaseCatalog>>,
+    /// Game assets (textures, models) from the user's install; shared across map loads.
+    pub assets: Arc<crate::assets::Assets>,
     problems: (u64, Vec<Problem>),
 }
 
@@ -216,6 +218,7 @@ impl EditorState {
             actions: Vec::new(),
             ui: PanelStates::default(),
             base: None,
+            assets: Arc::default(),
             problems: (u64::MAX, Vec::new()),
         }
     }
@@ -227,6 +230,7 @@ impl EditorState {
             mode: self.mode,
             brush: self.brush,
             base: self.base.take(),
+            assets: self.assets.clone(),
             ui,
             ..Self::new(doc)
         };

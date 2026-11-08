@@ -3182,6 +3182,7 @@ dependencies = [
  "serde_json",
  "strata-casc",
  "strata-core",
+ "strata-dds",
  "strata-format",
  "tungstenite",
  "wasm-bindgen",
@@ -3206,6 +3207,14 @@ dependencies = [
  "serde",
  "serde_json",
  "strata-casc",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "strata-dds"
+version = "0.1.0"
+dependencies = [
+ "texture2ddecoder",
  "thiserror 2.0.21",
 ]
 
@@ -3289,6 +3298,15 @@ dependencies = [
  "once_cell",
  "rustix 1.1.6",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "texture2ddecoder"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "427ae8ec7f2f0fdd3146b77cfa44bea880caf066f7e55398a8467afe2645c832"
+dependencies = [
+ "paste",
 ]
 
 [[package]]
