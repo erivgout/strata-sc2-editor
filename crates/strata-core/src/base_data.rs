@@ -65,6 +65,9 @@ pub struct BaseUnit {
     pub footprint: Option<String>,
     /// The mod that introduced the unit ("Liberty", "Void"...).
     pub source_mod: String,
+    /// Whether the game gives it a display name; unnamed units are mostly
+    /// internal variants (skins, placeholders, test units).
+    pub named: bool,
 }
 
 impl BaseUnit {
@@ -372,9 +375,12 @@ impl BaseCatalog {
                 _ => UnitGroup::Neutral,
             };
             let id = e.id().to_owned();
-            let name = self.display_name(CatalogKind::Unit, &id).unwrap_or(&id).to_owned();
+            let display = self.display_name(CatalogKind::Unit, &id);
+            let named = display.is_some();
+            let name = display.unwrap_or(&id).to_owned();
             out.push(BaseUnit {
                 name,
+                named,
                 race,
                 structure: object_type == "Structure"
                     || get(&FieldKey::indexed("Attributes", "Structure")) == Some("1"),

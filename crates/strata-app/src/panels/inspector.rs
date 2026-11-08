@@ -580,7 +580,8 @@ fn base_unit_list(ui: &mut egui::Ui, state: &mut EditorState, base: &BaseCatalog
     let units: Vec<&BaseUnit> = base
         .units()
         .iter()
-        .filter(|u| all || u.is_melee() || u.id == state.place_type)
+        // Unnamed melee units are internal variants; they show up when searched.
+        .filter(|u| all || (u.is_melee() && (u.named || !q.is_empty())) || u.id == state.place_type)
         .filter(|u| q.is_empty() || u.name.to_lowercase().contains(q) || u.id.to_lowercase().contains(q))
         .collect();
     let mut names: HashMap<&str, usize> = HashMap::new();

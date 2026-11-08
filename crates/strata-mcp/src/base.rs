@@ -162,6 +162,7 @@ pub fn list_units(search: Option<&str>, race: Option<&str>, melee_only: bool, li
                 "radius": u.radius,
                 "footprint": u.footprint,
                 "mod": u.source_mod,
+                "named": u.named,
             })
         })
         .collect();

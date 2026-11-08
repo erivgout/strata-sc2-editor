@@ -56,7 +56,9 @@ fn real_base_data() {
     assert!(cat.unit("Mutalisk").is_some_and(|u| u.air));
     for g in UnitGroup::ALL {
         let n = cat.units().iter().filter(|u| u.race == g && u.is_melee()).count();
-        eprintln!("  {}: {n} melee units", g.label());
+        let named: Vec<&str> =
+            cat.units().iter().filter(|u| u.race == g && u.is_melee() && u.named).map(|u| u.name.as_str()).collect();
+        eprintln!("  {}: {n} melee units, {} named: {}", g.label(), named.len(), named.join(", "));
         assert!(n > 10, "{} has only {n} melee units", g.label());
     }
 
