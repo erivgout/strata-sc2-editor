@@ -13,6 +13,7 @@ path = "src/main.rs"
 strata-core.workspace = true
 strata-format.workspace = true
 strata-dds.workspace = true
+strata-m3.workspace = true
 strata-casc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -34,5 +35,5 @@ tungstenite = "0.27"
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
-web-sys = { version = "0.3", features = ["Window", "Document", "HtmlCanvasElement", "Storage", "WebSocket", "MessageEvent", "BinaryType", "Blob", "BlobPropertyBag", "Url", "HtmlAnchorElement", "Navigator", "Element", "DomTokenList", "Node"] }
+web-sys = { version = "0.3", features = ["Window", "Document", "HtmlCanvasElement", "Storage", "WebSocket", "MessageEvent", "BinaryType", "Blob", "BlobPropertyBag", "Url", "HtmlAnchorElement", "Navigator", "Element", "DomTokenList", "Node", "Performance"] }
 js-sys = "0.3"

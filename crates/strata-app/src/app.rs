@@ -359,6 +359,12 @@ impl StrataApp {
                 app.dialog = Some(Dialog::Welcome);
             }
         }
+        // Development aid: STRATA_OPEN=<map path> opens a map on startup.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Ok(path) = std::env::var("STRATA_OPEN") {
+            app.dialog = None;
+            app.io.open_path(&cc.egui_ctx, path);
+        }
         app
     }
 

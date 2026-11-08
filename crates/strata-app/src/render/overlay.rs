@@ -407,7 +407,45 @@ fn draw_camera(
     text_aligned(painter, ts + egui::vec2(10.0, 10.0), egui::Align2::LEFT_CENTER, &c.name, tk);
 }
 
-/// Draw every region, camera and object, culled to `rect`.
+/// Selection and hover feedback for an object drawn as a 3D model: a ring
+/// on the ground around its footprint (like the game's selection circle)
+/// and the label below it. The model itself replaces the marker.
+fn draw_model_mark(
+    painter: &egui::Painter,
+    view: &View,
+    origin: Pos2,
+    o: &PlacedObject,
+    mark: &super::models::ModelMark,
+    style: MarkerStyle,
+    tk: &Tokens,
+) -> Option<Label> {
+    let r = mark.radius * 1.08 + 0.15;
+    let ring: Vec<Pos2> = (0..40)
+        .filter_map(|k| {
+            let a = k as f32 / 40.0 * std::f32::consts::TAU;
+            view.project(mark.anchor + Vec3::new(a.cos() * r, a.sin() * r, 0.05)).map(|s| to_screen(origin, s))
+        })
+        .collect();
+    if ring.len() == 40 {
+        if style.selected {
+            painter.add(egui::Shape::closed_line(ring.clone(), Stroke::new(4.5, HALO.gamma_multiply(0.6))));
+            painter.add(egui::Shape::closed_line(ring.clone(), Stroke::new(2.0, tk.accent)));
+        } else if style.hovered {
+            painter.add(egui::Shape::closed_line(ring.clone(), Stroke::new(3.5, HALO.gamma_multiply(0.5))));
+            painter.add(egui::Shape::closed_line(ring.clone(), Stroke::new(1.5, HOVER.gamma_multiply(0.9))));
+        }
+    }
+    if !(style.selected || style.hovered) || o.type_id.is_empty() && o.name.is_empty() {
+        return None;
+    }
+    let bottom = ring.iter().map(|p| p.y).fold(f32::MIN, f32::max);
+    let c = view.project(mark.anchor).map(|s| to_screen(origin, s))?;
+    let priority = if style.selected { 3000.0 } else { 2000.0 };
+    Some(Label { at: Pos2::new(c.x, bottom.max(c.y) + 5.0), text: object_label(o).to_owned(), priority })
+}
+
+/// Draw every region, camera and object, culled to `rect`. Objects in
+/// `models` are drawn as 3D models already and only get rings and labels.
 pub fn draw_document(
     painter: &egui::Painter,
     state: &EditorState,
@@ -415,6 +453,7 @@ pub fn draw_document(
     rect: egui::Rect,
     hovered: Option<ObjectId>,
     tk: &Tokens,
+    models: &std::collections::HashMap<ObjectId, super::models::ModelMark>,
 ) {
     let doc = &state.doc;
     let origin = rect.min;
@@ -483,7 +522,11 @@ pub fn draw_document(
             hovered: hovered == Some(o.id),
             ghost: false,
         };
-        if let Some(l) = draw_object(painter, view, origin, o, style, tk) {
+        let label = match models.get(&o.id) {
+            Some(mark) => draw_model_mark(painter, view, origin, o, mark, style, tk),
+            None => draw_object(painter, view, origin, o, style, tk),
+        };
+        if let Some(l) = label {
             if !crowded || selected || style.hovered {
                 labels.push(l);
             }

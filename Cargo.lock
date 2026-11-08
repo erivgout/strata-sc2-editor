@@ -3184,6 +3184,7 @@ dependencies = [
  "strata-core",
  "strata-dds",
  "strata-format",
+ "strata-m3",
  "tungstenite",
  "wasm-bindgen",
  "wasm-bindgen-futures",
