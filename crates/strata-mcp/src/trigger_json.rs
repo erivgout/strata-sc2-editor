@@ -261,7 +261,8 @@ pub fn parse_stmt(v: &Value) -> Result<Stmt, String> {
                     .ok_or("\"set\" must be a variable name")?
                     .to_owned();
                 let value = parse_expr(o.get("value").ok_or("\"set\" needs \"value\"")?)?;
-                return Ok(Stmt::Set { variable, value });
+                let index = o.get("index").map(parse_expr).transpose()?;
+                return Ok(Stmt::Set { variable, value, index });
             }
             if let Some(cond) = o.get("if") {
                 return Ok(Stmt::If {
@@ -283,10 +284,12 @@ pub fn parse_stmt(v: &Value) -> Result<Stmt, String> {
                     .to_owned();
                 let from = parse_expr(o.get("from").ok_or("\"for\" needs \"from\"")?)?;
                 let to = parse_expr(o.get("to").ok_or("\"for\" needs \"to\"")?)?;
+                let step = o.get("step").map(parse_expr).transpose()?;
                 return Ok(Stmt::For {
                     variable,
                     from,
                     to,
+                    step,
                     body: block(o.get("do"), "do")?,
                 });
             }

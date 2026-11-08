@@ -1210,8 +1210,8 @@ mod tests {
         let script = c("get_galaxy_script", json!({})).unwrap();
         assert!(script.starts_with("// target: headless"));
         assert!(
-            script.contains("int gv_Wave;")
-                && script.contains("gv_Wave = 1;")
+            script.contains("int gv_wave;")
+                && script.contains("gv_wave = 1;")
                 && script.contains("gt_Wavetimer"),
             "{script}"
         );

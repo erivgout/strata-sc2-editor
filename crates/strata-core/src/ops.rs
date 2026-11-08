@@ -1555,7 +1555,7 @@ mod tests {
         }
         .run(&mut d)
         .is_err());
-        assert!(crate::galaxy::generate(&d).contains("int gv_Score[16];"));
+        assert!(crate::galaxy::generate(&d).contains("int[16] gv_score;"));
         run_and_undo(
             &mut d,
             Op::DeleteVariable {

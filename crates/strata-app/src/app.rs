@@ -364,21 +364,14 @@ impl StrataApp {
 
     fn drain_actions(&mut self, ctx: &egui::Context) {
         for a in std::mem::take(&mut self.state.actions) {
-            #[allow(unreachable_patterns)]
             let cmd = match a {
-                AppAction::NewMap => Command::NewMap,
-                AppAction::Open => Command::OpenMap,
-                AppAction::Save => Command::Save,
-                AppAction::SaveAs => Command::SaveAs,
                 AppAction::Undo => Command::Undo,
                 AppAction::Redo => Command::Redo,
-                AppAction::OpenCommandPalette => Command::OpenPalette,
                 AppAction::FocusTab(tab) => Command::FocusTab(tab),
                 AppAction::FrameWorld(p) => {
                     crate::panels::viewport::frame_world(&mut self.state, p);
                     continue;
                 }
-                _ => continue,
             };
             self.run(ctx, cmd);
         }

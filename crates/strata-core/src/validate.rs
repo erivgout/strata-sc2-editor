@@ -265,6 +265,25 @@ pub fn validate(doc: &MapDocument) -> Vec<Problem> {
         }
     }
 
+    for (name, message) in crate::triggers::check(&doc.triggers) {
+        push(Severity::Warning, format!("{name}: {message}"), Target::Trigger(name));
+    }
+    // Only lint the user's custom script: generated code is covered by
+    // `triggers::check`, and linting it would report codegen details users can't fix.
+    if !doc.triggers.custom_script.trim().is_empty() {
+        for d in crate::galaxy::lint(&doc.triggers.custom_script) {
+            let severity = match d.severity {
+                crate::galaxy::LintSeverity::Error => Severity::Error,
+                _ => Severity::Warning,
+            };
+            push(
+                severity,
+                format!("Custom script line {}: {}", d.line, d.message),
+                Target::Trigger("Custom script".into()),
+            );
+        }
+    }
+
     // Regions.
     let mut region_names = HashSet::new();
     for r in &doc.regions {

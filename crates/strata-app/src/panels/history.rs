@@ -6,9 +6,6 @@ use strata_core::history::{HistoryEntry, Origin};
 use crate::state::{AppAction, EditorState};
 use crate::theme::{self, Tokens};
 
-#[derive(Default)]
-pub struct HistoryState {}
-
 struct Entry {
     label: String,
     origin: Origin,

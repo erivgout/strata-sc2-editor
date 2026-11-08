@@ -104,13 +104,8 @@ pub struct Toast {
 /// Requests panels make of the app shell; drained once per frame.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AppAction {
-    NewMap,
-    Open,
-    Save,
-    SaveAs,
     Undo,
     Redo,
-    OpenCommandPalette,
     FocusTab(panels::Tab),
     /// Center the viewport on a world position.
     FrameWorld(glam::Vec2),
@@ -128,7 +123,6 @@ pub struct PanelStates {
     pub strings: panels::strings::StringsState,
     pub map_props: panels::map_props::MapPropsState,
     pub problems: panels::problems::ProblemsState,
-    pub history: panels::history::HistoryState,
     pub mcp: panels::mcp::McpState,
 }
 
