@@ -183,6 +183,9 @@ pub struct PanelStates {
 
 pub struct EditorState {
     pub doc: MapDocument,
+    /// Bumped by every [`EditorState::load`], so views can tell a newly
+    /// opened map from the old one even when size and name match.
+    pub doc_generation: u64,
     pub history: History,
     /// File name shown in the title bar, e.g. "MyMap.SC2Map".
     pub file_name: Option<String>,
@@ -219,6 +222,7 @@ impl EditorState {
             ui: PanelStates::default(),
             base: None,
             assets: Arc::default(),
+            doc_generation: 0,
             problems: (u64::MAX, Vec::new()),
         }
     }
@@ -231,6 +235,7 @@ impl EditorState {
             brush: self.brush,
             base: self.base.take(),
             assets: self.assets.clone(),
+            doc_generation: self.doc_generation + 1,
             ui,
             ..Self::new(doc)
         };

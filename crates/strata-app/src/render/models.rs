@@ -176,6 +176,8 @@ pub struct ModelRenderer {
     now: f64,
     logged_at: f64,
     logged: (usize, usize),
+    /// [`EditorState::doc_generation`] the caches belong to.
+    pub generation: Option<u64>,
     /// Objects drawn as models this frame.
     pub drawn: HashMap<ObjectId, ModelMark>,
     pub stats: ModelStats,
@@ -416,7 +418,11 @@ impl ModelRenderer {
             pass.mesh_uploads.append(&mut self.pending);
             pass.texture_uploads.extend(tex_uploads);
             pass.frame = frame;
-            busy |= !pass.mesh_uploads.is_empty() || !pass.texture_uploads.is_empty();
+            busy |= !pass.mesh_uploads.is_empty()
+                || !pass.texture_uploads.is_empty()
+                || pass.release_all
+                || !pass.retired_meshes.is_empty()
+                || !pass.retired_textures.is_empty();
         }
 
         self.stats = ModelStats {
@@ -988,9 +994,16 @@ pub struct ModelPass {
     mesh_uploads: Vec<MeshUpload>,
     texture_uploads: Vec<TextureUpload>,
     frame: FrameDraws,
-    /// Free every mesh and texture at the next paint (a new map was opened).
+    /// Retire every mesh and texture at the next paint (a new map was opened).
     release_all: bool,
+    /// Retired GPU objects, freed a few per paint so a big map change never
+    /// stalls a frame.
+    retired_meshes: Vec<GpuMesh>,
+    retired_textures: Vec<glow::Texture>,
 }
+
+/// GPU objects deleted per paint at most.
+const DELETES_PER_FRAME: usize = 64;
 
 /// Uploads done per paint at most, so a burst of new models spreads over frames.
 const UPLOADS_PER_FRAME: usize = 12;
@@ -1157,13 +1170,18 @@ impl ModelPass {
     unsafe fn upload(&mut self, gl: &glow::Context) {
         unsafe {
             if std::mem::take(&mut self.release_all) {
-                for (_, m) in self.meshes.drain() {
+                self.retired_meshes.extend(self.meshes.drain().map(|(_, m)| m));
+                self.retired_textures.extend(self.textures.drain().map(|(_, t)| t));
+            }
+            for _ in 0..DELETES_PER_FRAME {
+                if let Some(m) = self.retired_meshes.pop() {
                     gl.delete_vertex_array(m.vao);
                     gl.delete_buffer(m.vbo);
                     gl.delete_buffer(m.ibo);
-                }
-                for (_, t) in self.textures.drain() {
+                } else if let Some(t) = self.retired_textures.pop() {
                     gl.delete_texture(t);
+                } else {
+                    break;
                 }
             }
             let mut budget = UPLOADS_PER_FRAME;
