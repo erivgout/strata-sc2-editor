@@ -35,6 +35,8 @@ pub struct Settings {
     /// Recently run palette commands, newest first.
     pub recent_commands: Vec<Command>,
     pub show_welcome: bool,
+    /// Release tag the user chose to skip (desktop updater).
+    pub skipped_update: Option<String>,
 }
 
 impl Default for Settings {
@@ -47,6 +49,7 @@ impl Default for Settings {
             recent: Vec::new(),
             recent_commands: Vec::new(),
             show_welcome: true,
+            skipped_update: None,
         }
     }
 }
@@ -275,6 +278,9 @@ enum NoticeAction {
     Run(Command),
     DiscardRestored,
     Reload,
+    /// Don't offer this release tag again (desktop updater).
+    #[cfg(not(target_arch = "wasm32"))]
+    SkipUpdate(String),
     Dismiss,
 }
 
@@ -306,6 +312,11 @@ pub struct StrataApp {
     queued: Vec<Command>,
     /// Base-game data from the user's StarCraft II install.
     game_data: crate::game_data::GameData,
+    #[cfg(not(target_arch = "wasm32"))]
+    updater: crate::updater::Updater,
+    /// The newer release offered to the user, if any.
+    #[cfg(not(target_arch = "wasm32"))]
+    update_offer: Option<crate::updater::Release>,
 }
 
 impl StrataApp {
@@ -332,8 +343,14 @@ impl StrataApp {
             pending_then: None,
             queued: Vec::new(),
             game_data: Default::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            updater: Default::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            update_offer: None,
         };
         app.game_data.start(&cc.egui_ctx);
+        #[cfg(not(target_arch = "wasm32"))]
+        app.updater.check(&cc.egui_ctx, false);
         // STRATA_OPEN=<map>: open a map on start (native; used to check
         // rendering against real maps).
         #[cfg(not(target_arch = "wasm32"))]
@@ -408,7 +425,11 @@ impl StrataApp {
     fn run_inner(&mut self, ctx: &egui::Context, cmd: Command, confirmed: bool) {
         let replaces_doc = matches!(
             cmd,
-            Command::NewMap | Command::OpenMap | Command::OpenFolder | Command::OpenRecent(_)
+            Command::NewMap
+                | Command::OpenMap
+                | Command::OpenFolder
+                | Command::OpenRecent(_)
+                | Command::RestartToUpdate
         );
         if replaces_doc && !confirmed && self.state.history.is_modified() {
             self.dialog = Some(Dialog::Unsaved(Then::Run(cmd)));
@@ -482,6 +503,21 @@ impl StrataApp {
             Command::InstallApp => crate::io::install(),
             Command::ShowWelcome => self.dialog = Some(Dialog::Welcome),
             Command::About => self.dialog = Some(Dialog::About),
+            #[cfg(not(target_arch = "wasm32"))]
+            Command::CheckForUpdates => self.updater.check(ctx, true),
+            #[cfg(not(target_arch = "wasm32"))]
+            Command::InstallUpdate => {
+                if let Some(r) = self.update_offer.clone() {
+                    self.updater.install(ctx, r);
+                }
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            Command::RestartToUpdate => match crate::updater::relaunch() {
+                Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+                Err(e) => self.state.toast(ToastKind::Error, e),
+            },
+            #[cfg(target_arch = "wasm32")]
+            Command::CheckForUpdates | Command::InstallUpdate | Command::RestartToUpdate => {}
         }
     }
 
@@ -562,6 +598,70 @@ impl StrataApp {
                     actions,
                 });
             }
+        }
+    }
+
+    /// Turn updater events into notices.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn handle_updates(&mut self, ctx: &egui::Context) {
+        use crate::updater::{Event, Status};
+        while let Some(ev) = self.updater.poll() {
+            match ev {
+                Event::Checked { result: Ok(Some(r)), manual } => {
+                    if !manual && self.settings.skipped_update.as_deref() == Some(r.tag.as_str()) {
+                        continue;
+                    }
+                    self.notice(Notice {
+                        key: "update",
+                        kind: ToastKind::Info,
+                        text: format!(
+                            "Strata {} is available (you have {}). Update now? Strata downloads it, checks it and installs it.",
+                            r.version_text(),
+                            env!("CARGO_PKG_VERSION")
+                        ),
+                        actions: vec![
+                            ("Update now", NoticeAction::Run(Command::InstallUpdate)),
+                            ("Later", NoticeAction::Dismiss),
+                            ("Skip this version", NoticeAction::SkipUpdate(r.tag.clone())),
+                        ],
+                    });
+                    self.update_offer = Some(r);
+                }
+                Event::Checked { result: Ok(None), manual: true } => self
+                    .state
+                    .toast(ToastKind::Success, format!("Strata {} is up to date", env!("CARGO_PKG_VERSION"))),
+                Event::Checked { result: Err(e), manual: true } => {
+                    self.state.toast(ToastKind::Error, format!("Couldn't check for updates: {e}"))
+                }
+                Event::Checked { result: Err(e), manual: false } => log::info!("update check: {e}"),
+                Event::Checked { .. } => {}
+                Event::Progress(_) => {}
+                Event::Installed(Ok(r)) => self.notice(Notice {
+                    key: "update",
+                    kind: ToastKind::Success,
+                    text: format!("Strata {} is installed. Restart to start using it.", r.version_text()),
+                    actions: vec![
+                        ("Restart now", NoticeAction::Run(Command::RestartToUpdate)),
+                        ("Later", NoticeAction::Dismiss),
+                    ],
+                }),
+                Event::Installed(Err(e)) => self.notice(Notice {
+                    key: "update",
+                    kind: ToastKind::Error,
+                    text: format!("The update wasn't installed: {e}. Strata is unchanged."),
+                    actions: vec![
+                        ("Try again", NoticeAction::Run(Command::InstallUpdate)),
+                        ("Dismiss", NoticeAction::Dismiss),
+                    ],
+                }),
+            }
+        }
+        if let Status::Downloading { version, progress } = &self.updater.status {
+            let text = format!("Downloading Strata {version}… {:.0}%", progress * 100.0);
+            if self.notices.iter().all(|n| n.key != "update" || n.text != text) {
+                self.notice(Notice { key: "update", kind: ToastKind::Info, text, actions: Vec::new() });
+            }
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
         }
     }
 
@@ -890,6 +990,8 @@ impl StrataApp {
                 if self.can_install {
                     self.menu_cmd(ui, Command::InstallApp);
                 }
+                #[cfg(not(target_arch = "wasm32"))]
+                self.menu_cmd(ui, Command::CheckForUpdates);
                 ui.separator();
                 self.menu_cmd(ui, Command::About);
             })
@@ -1557,6 +1659,8 @@ impl StrataApp {
                         .toast(ToastKind::Info, "Discarded the restored map");
                 }
                 NoticeAction::Reload => crate::io::reload_for_update(),
+                #[cfg(not(target_arch = "wasm32"))]
+                NoticeAction::SkipUpdate(tag) => self.settings.skipped_update = Some(tag),
                 NoticeAction::Dismiss => {}
             }
         }
@@ -1606,6 +1710,8 @@ impl eframe::App for StrataApp {
         self.poll_web(&ctx);
         self.handle_io();
         self.handle_game_data();
+        #[cfg(not(target_arch = "wasm32"))]
+        self.handle_updates(&ctx);
         if let Some(src) = self.game_data.take_assets() {
             self.state.assets.attach(src, &ctx);
         }

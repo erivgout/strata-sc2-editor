@@ -36,6 +36,12 @@ pub enum Command {
     FrameMap,
     ShowProblems,
     InstallApp,
+    /// Desktop: ask GitHub for a newer release.
+    CheckForUpdates,
+    /// Desktop: download and install the offered release.
+    InstallUpdate,
+    /// Desktop: restart into the installed update (guarded like closing a map).
+    RestartToUpdate,
     ShowWelcome,
     About,
 }
@@ -102,6 +108,9 @@ impl Command {
             Command::FrameMap => "Frame the whole map".into(),
             Command::ShowProblems => "Check map for problems".into(),
             Command::InstallApp => "Install Strata as an app".into(),
+            Command::CheckForUpdates => "Check for updates…".into(),
+            Command::InstallUpdate => "Install update".into(),
+            Command::RestartToUpdate => "Restart to update".into(),
             Command::ShowWelcome => "Welcome screen".into(),
             Command::About => "About Strata".into(),
         }
@@ -127,6 +136,9 @@ impl Command {
             Command::ConnectAi => "AI link",
             Command::ShowShortcuts
             | Command::InstallApp
+            | Command::CheckForUpdates
+            | Command::InstallUpdate
+            | Command::RestartToUpdate
             | Command::ShowWelcome
             | Command::About => "Help",
         }
@@ -166,6 +178,7 @@ impl Command {
             Command::FrameMap => "zoom fit camera center",
             Command::ShowProblems => "validate errors warnings",
             Command::InstallApp => "pwa desktop offline",
+            Command::CheckForUpdates | Command::InstallUpdate | Command::RestartToUpdate => "update upgrade version release new",
             Command::About => "version license",
             _ => "",
         }
@@ -229,6 +242,9 @@ pub fn all(cx: &Context<'_>) -> Vec<Command> {
     ]);
     if cx.can_install {
         v.push(Command::InstallApp);
+    }
+    if cfg!(not(target_arch = "wasm32")) {
+        v.push(Command::CheckForUpdates);
     }
     v.push(Command::About);
     v

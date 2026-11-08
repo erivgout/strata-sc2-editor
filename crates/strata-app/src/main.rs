@@ -11,6 +11,8 @@ mod render;
 mod state;
 mod theme;
 mod tools;
+#[cfg(not(target_arch = "wasm32"))]
+mod updater;
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result<()> {
