@@ -58,19 +58,20 @@ impl Mode {
         }
     }
 
-    /// Single-key shortcut shown in tooltips and the palette.
+    /// Number-row shortcut (1..9, 0) shown in tooltips and the palette.
+    /// Letters are left free for camera panning (WASD) and tool keys.
     pub fn shortcut(self) -> char {
         match self {
-            Mode::Select => 'Q',
-            Mode::Sculpt => 'W',
-            Mode::Paint => 'E',
-            Mode::Cliff => 'R',
-            Mode::Pathing => 'T',
-            Mode::Units => 'U',
-            Mode::Doodads => 'D',
-            Mode::Points => 'P',
-            Mode::Regions => 'G',
-            Mode::Cameras => 'C',
+            Mode::Select => '1',
+            Mode::Sculpt => '2',
+            Mode::Paint => '3',
+            Mode::Cliff => '4',
+            Mode::Pathing => '5',
+            Mode::Units => '6',
+            Mode::Doodads => '7',
+            Mode::Points => '8',
+            Mode::Regions => '9',
+            Mode::Cameras => '0',
         }
     }
 }

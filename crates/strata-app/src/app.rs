@@ -170,6 +170,7 @@ impl eframe::App for StrataApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.apply_theme(&ctx);
+        crate::mcp_link::tick(&ctx, &mut self.state);
         Shortcuts::handle(&ctx, &mut self.state, &mut self.palette);
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(self.state.title()));
 
