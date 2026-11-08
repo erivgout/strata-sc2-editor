@@ -170,18 +170,22 @@ pub fn show(ui: &mut Ui, state: &mut EditorState) {
                             } else {
                                 RichText::new(&p.message)
                             };
-                            let r = ui.add(
-                                Label::new(text)
-                                    .wrap()
-                                    .sense(Sense::click())
-                                    .selectable(false),
-                            );
-                            ui.label(
-                                RichText::new(target_hint(state, &p.target))
-                                    .color(tk.text_dim)
-                                    .small(),
-                            );
-                            r
+                            // Message above its target so neither is clipped in narrow docks.
+                            ui.vertical(|ui| {
+                                let r = ui.add(
+                                    Label::new(text)
+                                        .wrap()
+                                        .sense(Sense::click())
+                                        .selectable(false),
+                                );
+                                ui.label(
+                                    RichText::new(target_hint(state, &p.target))
+                                        .color(tk.text_dim)
+                                        .small(),
+                                );
+                                r
+                            })
+                            .inner
                         })
                         .inner;
                     let r = r

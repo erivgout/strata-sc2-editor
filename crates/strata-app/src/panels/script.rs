@@ -285,8 +285,8 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState) {
     }
 
     let mut jump: Option<TriggerId> = None;
-    // Toolbar.
-    ui.horizontal(|ui| {
+    // Toolbar. Wraps in narrow docks so the lint summary is never clipped.
+    ui.horizontal_wrapped(|ui| {
         if ui.button("Copy all").on_hover_text("Copy the whole script to the clipboard").clicked() {
             ui.ctx().copy_text(cache.gen.script.clone());
         }
