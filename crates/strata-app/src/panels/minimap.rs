@@ -18,16 +18,29 @@ const MAX_SIDE: u32 = 512;
 #[derive(Default)]
 pub struct MinimapState {
     texture: Option<egui::TextureHandle>,
-    revision: Option<u64>,
+    revision: Option<(u64, u64)>,
     built_at: f64,
 }
 
-/// Shaded color image of the terrain, north at the top.
-pub fn terrain_image(t: &Terrain) -> egui::ColorImage {
+/// Brightens a terrain texture's mean color like the 3D view does.
+const TEXTURE_GAIN: f32 = 1.0;
+
+/// Shaded color image of the terrain, north at the top. `real` holds the
+/// mean color of each layer's game texture where it is loaded; other layers
+/// use their placeholder color.
+pub fn terrain_image(t: &Terrain, real: &[Option<[u8; 3]>]) -> egui::ColorImage {
     let step = t.width.max(t.height).div_ceil(MAX_SIDE).max(1);
     let w = (t.width / step).max(1);
     let h = (t.height / step).max(1);
-    let colors: Vec<[f32; 3]> = t.layers.iter().map(|l| texture_color(&l.texture).map(|c| c as f32 / 255.0)).collect();
+    let colors: Vec<[f32; 3]> = t
+        .layers
+        .iter()
+        .enumerate()
+        .map(|(i, l)| match real.get(i).copied().flatten() {
+            Some(c) => c.map(|c| (c as f32 / 255.0 * TEXTURE_GAIN).min(1.0)),
+            None => texture_color(&l.texture).map(|c| c as f32 / 255.0),
+        })
+        .collect();
     let (lo, hi) = t.min_max_height();
     let span = (hi - lo).max(1.0);
     // Same key light as the 3D view so relief reads the same way.
@@ -64,6 +77,30 @@ pub fn terrain_image(t: &Terrain) -> egui::ColorImage {
     egui::ColorImage::new([w as usize, h as usize], pixels)
 }
 
+/// The part of segment `a`-`b` inside `r` (Liang-Barsky), if any.
+pub fn clip_segment(a: Pos2, b: Pos2, r: Rect) -> Option<(Pos2, Pos2)> {
+    if !(a.x.is_finite() && a.y.is_finite() && b.x.is_finite() && b.y.is_finite()) {
+        return None;
+    }
+    let d = b - a;
+    let (mut t0, mut t1) = (0.0f32, 1.0f32);
+    for (p, q) in [(-d.x, a.x - r.min.x), (d.x, r.max.x - a.x), (-d.y, a.y - r.min.y), (d.y, r.max.y - a.y)] {
+        if p == 0.0 {
+            if q < 0.0 {
+                return None;
+            }
+        } else {
+            let t = q / p;
+            if p < 0.0 {
+                t0 = t0.max(t);
+            } else {
+                t1 = t1.min(t);
+            }
+        }
+    }
+    (t0 < t1).then(|| (a + d * t0, a + d * t1))
+}
+
 /// Fit a `w x h` map into `avail`, keeping its aspect ratio, centered.
 pub fn fit_rect(avail: Rect, w: f32, h: f32) -> Rect {
     let s = (avail.width() / w).min(avail.height() / h).max(0.0);
@@ -74,12 +111,13 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState) {
     let ctx = ui.ctx().clone();
     let tk = theme::tokens(&ctx);
     let now = ctx.input(|i| i.time);
-    let rev = state.history.revision();
+    let textures = &state.ui.viewport.renderer.textures;
+    let rev = (state.history.revision(), textures.colors_revision);
     let t = &state.doc.terrain;
     let ms = &mut state.ui.minimap;
     let stale = ms.revision != Some(rev);
     if ms.texture.is_none() || (stale && now - ms.built_at >= THROTTLE) {
-        let img = terrain_image(t);
+        let img = terrain_image(t, &textures.layer_colors());
         match ms.texture.as_mut() {
             Some(tex) => tex.set(img, egui::TextureOptions::LINEAR),
             None => ms.texture = Some(ctx.load_texture("strata-minimap", img, egui::TextureOptions::LINEAR)),
@@ -149,12 +187,20 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState) {
         painter.circle_stroke(p, r + 0.5, rim);
     }
 
-    // Camera footprint, clipped to the map image (far corners of a low
-    // camera land well beyond the map).
+    // Camera footprint, cut to the map image: a low camera's far corners
+    // land well beyond the map, so each edge is clipped analytically and
+    // only the parts over the image are drawn (inset so the stroke's width
+    // stays inside too).
     if let Some(fp) = state.ui.viewport.footprint {
         let pts: Vec<Pos2> = fp.iter().map(|p| to_px(*p)).collect();
+        let stroke = Stroke::new(1.5, tk.text);
+        let inner = rect.shrink(stroke.width * 0.5);
         let clipped = painter.with_clip_rect(rect);
-        clipped.add(egui::Shape::closed_line(pts, Stroke::new(1.5, tk.text)));
+        for i in 0..pts.len() {
+            if let Some((a, b)) = clip_segment(pts[i], pts[(i + 1) % pts.len()], inner) {
+                clipped.line_segment([a, b], stroke);
+            }
+        }
     }
 
     if let Some(p) = response.interact_pointer_pos() {
@@ -183,7 +229,7 @@ mod tests {
             }
         }
         t.layers.push(strata_core::terrain::TextureLayer { texture: "AgriaGrassGreen".into(), weights: w });
-        let img = terrain_image(&t);
+        let img = terrain_image(&t, &[]);
         assert_eq!(img.size, [8, 4]);
         let top = img.pixels[0];
         let bottom = img.pixels[img.pixels.len() - 1];
@@ -194,8 +240,30 @@ mod tests {
     #[test]
     fn large_maps_are_downsampled() {
         let t = Terrain::new(1024, 256);
-        let img = terrain_image(&t);
+        let img = terrain_image(&t, &[]);
         assert_eq!(img.size, [512, 128]);
+    }
+
+    #[test]
+    fn real_texture_colors_override_placeholders() {
+        let t = Terrain::new(4, 4);
+        let img = terrain_image(&t, &[Some([10, 120, 20])]);
+        let p = img.pixels[5];
+        assert!(p.g() > p.r() * 3 && p.g() > p.b() * 3, "{p:?}");
+    }
+
+    #[test]
+    fn footprint_edges_are_clipped_to_the_image() {
+        let r = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(100.0, 100.0));
+        // Entirely outside.
+        assert_eq!(clip_segment(Pos2::new(-50.0, -10.0), Pos2::new(150.0, -5.0), r), None);
+        // Crossing: cut at both borders.
+        let (a, b) = clip_segment(Pos2::new(-100.0, 50.0), Pos2::new(1e6, 50.0), r).unwrap();
+        assert_eq!((a.x, b.x), (0.0, 100.0));
+        // Inside: unchanged.
+        let s = (Pos2::new(10.0, 10.0), Pos2::new(20.0, 30.0));
+        assert_eq!(clip_segment(s.0, s.1, r), Some(s));
+        assert_eq!(clip_segment(Pos2::new(f32::NAN, 0.0), Pos2::new(1.0, 1.0), r), None);
     }
 
     #[test]

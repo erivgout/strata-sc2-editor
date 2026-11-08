@@ -10,6 +10,12 @@
 //!   or a folder upload input where that is missing) and reads CASC from it
 //!   in the page; nothing leaves the browser.
 //!
+//! Either way the install is also handed to the game-asset service
+//! ([`crate::assets`]) for textures and models: the folder path natively; on
+//! the web the opened storage itself. The page remembers the picked folder
+//! (IndexedDB) and reopens it on later visits where the browser still grants
+//! access, so textures come back without asking again.
+//!
 //! The index is built from the user's own install at runtime; Strata never
 //! ships Blizzard data.
 
@@ -23,6 +29,8 @@ enum Msg {
     Done(Result<Box<BaseCatalog>, String>, Source),
     /// Nothing to load (no install found, picker cancelled).
     Idle(Option<String>),
+    /// The install to read game assets (textures, models) from.
+    Assets(crate::assets::AssetSource),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -44,6 +52,7 @@ pub struct GameData {
     pub status: Status,
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
+    assets: Option<crate::assets::AssetSource>,
 }
 
 /// What [`GameData::poll`] tells the app.
@@ -62,6 +71,7 @@ impl Default for GameData {
             status: Status::Missing("Game data not loaded".into()),
             tx,
             rx,
+            assets: None,
         }
     }
 }
@@ -82,8 +92,9 @@ impl GameData {
         }
         #[cfg(target_arch = "wasm32")]
         {
-            let _ = ctx;
-            match web::restore_cache() {
+            let cached = web::restore_cache();
+            let version = cached.as_ref().map(|c| c.version.clone());
+            match cached {
                 Some(cat) => {
                     let _ = self.tx.send(Msg::Done(Ok(Box::new(cat)), Source::Cache));
                 }
@@ -92,6 +103,9 @@ impl GameData {
                         Status::Missing("No game data yet: run \"Load game data from StarCraft II folder…\"".into());
                 }
             }
+            // Reopen the folder picked last time, where the browser still
+            // allows it, for game assets (and a fresh index if needed).
+            web::reopen(self.tx.clone(), ctx.clone(), version);
         }
     }
 
@@ -116,12 +130,19 @@ impl GameData {
         }
     }
 
+    /// The install found or picked, for [`crate::assets::Assets::attach`].
+    /// Call after [`GameData::poll`].
+    pub fn take_assets(&mut self) -> Option<crate::assets::AssetSource> {
+        self.assets.take()
+    }
+
     /// Drain finished work. Call once per frame.
     pub fn poll(&mut self) -> Option<Event> {
         let mut out = None;
         while let Ok(m) = self.rx.try_recv() {
             match m {
                 Msg::Progress(p) => self.status = Status::Loading(p),
+                Msg::Assets(a) => self.assets = Some(a),
                 Msg::Idle(why) => self.status = Status::Missing(why.unwrap_or_else(|| "Game data not loaded".into())),
                 Msg::Done(Ok(cat), source) => {
                     self.status = Status::Ready;
@@ -168,6 +189,7 @@ mod native {
 
     /// Cached index for this install's version, or a fresh build.
     fn load(root: &Path, tx: &std::sync::mpsc::Sender<Msg>, ctx: &egui::Context) {
+        send(tx, ctx, Msg::Assets(crate::assets::AssetSource::Dir(root.to_path_buf())));
         let version = base_data::install_version(root);
         if let Some(cat) = version
             .as_deref()
@@ -254,6 +276,9 @@ mod native {
 }
 
 #[cfg(target_arch = "wasm32")]
+pub use web::WebSource;
+
+#[cfg(target_arch = "wasm32")]
 mod web {
     use std::future::Future;
 
@@ -288,7 +313,7 @@ mod web {
     }
 
     /// Reads the folder the user picked, through the page's JS glue.
-    struct WebSource;
+    pub struct WebSource;
 
     impl strata_casc::Source for WebSource {
         fn read(&self, path: &str, offset: u64, len: Option<u64>) -> impl Future<Output = Result<Vec<u8>, CascError>> {
@@ -352,45 +377,93 @@ mod web {
     pub fn pick(tx: std::sync::mpsc::Sender<Msg>, ctx: egui::Context) -> Result<(), String> {
         support()?;
         wasm_bindgen_futures::spawn_local(async move {
-            let send = |m: Msg| {
-                let _ = tx.send(m);
-                ctx.request_repaint();
-            };
             let picked = match call("strataSc2Pick", &[]).await {
                 Ok(v) => v.as_string(),
                 Err(e) => {
-                    send(Msg::Done(
-                        Err(format!("Could not open the folder: {e}")),
-                        Source::Install,
-                    ));
+                    let _ = tx.send(Msg::Done(Err(format!("Could not open the folder: {e}")), Source::Install));
+                    ctx.request_repaint();
                     return;
                 }
             };
-            let Some(name) = picked else {
-                send(Msg::Idle(None));
-                return;
-            };
+            match picked {
+                Some(name) => open_and_load(&tx, &ctx, name, None).await,
+                None => {
+                    let _ = tx.send(Msg::Idle(None));
+                    ctx.request_repaint();
+                }
+            }
+        });
+        Ok(())
+    }
+
+    /// Start-up: reopen the folder picked in an earlier session if the
+    /// browser still grants access without asking (the page keeps the
+    /// folder handle in IndexedDB). Rebuilds the index only when the cached
+    /// one (`cached_version`) is missing or from another game version.
+    pub fn reopen(tx: std::sync::mpsc::Sender<Msg>, ctx: egui::Context, cached_version: Option<String>) {
+        if window_fn("strataSc2Restore").is_none() {
+            return;
+        }
+        wasm_bindgen_futures::spawn_local(async move {
+            match call("strataSc2Restore", &[]).await {
+                Ok(v) => {
+                    if let Some(name) = v.as_string() {
+                        open_and_load(&tx, &ctx, name, cached_version).await;
+                    }
+                }
+                Err(e) => log::info!("previous StarCraft II folder not reopened: {e}"),
+            }
+        });
+    }
+
+    /// Opens the CASC storage of the folder the page holds, builds the index
+    /// unless `cached_version` already matches, and hands the storage to the
+    /// asset service.
+    async fn open_and_load(
+        tx: &std::sync::mpsc::Sender<Msg>,
+        ctx: &egui::Context,
+        name: String,
+        cached_version: Option<String>,
+    ) {
+        let send = |m: Msg| {
+            let _ = tx.send(m);
+            ctx.request_repaint();
+        };
+        let fresh = cached_version.is_none();
+        if fresh {
             send(Msg::Progress(format!("Reading StarCraft II data from {name}…")));
-            let result = async {
-                let storage = strata_casc::Storage::open_filtered(WebSource, base_data::casc_filter).await.map_err(|e| match e {
+        }
+        let storage = match strata_casc::Storage::open_filtered(WebSource, crate::assets::full_filter).await {
+            Ok(s) => s,
+            Err(e) => {
+                let e = match e {
                     CascError::NotAnInstall(why) => format!(
                         "\"{name}\" is not a StarCraft II install folder ({why}). Pick the folder that contains \"StarCraft II.exe\" and SC2Data."
                     ),
                     e => e.to_string(),
-                })?;
-                base_data::load_from_casc(&storage, MELEE_MODS, |m| send(Msg::Progress(progress_line(m)))).await
+                };
+                if fresh {
+                    send(Msg::Done(Err(format!("Could not read StarCraft II data: {e}")), Source::Install));
+                } else {
+                    log::warn!("previous StarCraft II folder: {e}");
+                }
+                return;
             }
-            .await;
+        };
+        if cached_version.as_deref() != Some(storage.build.version.as_str()) {
+            if !fresh {
+                send(Msg::Progress(format!("Reading StarCraft II data from {name}…")));
+            }
+            let result =
+                base_data::load_from_casc(&storage, MELEE_MODS, |m| send(Msg::Progress(progress_line(m)))).await;
             if let Ok(cat) = &result {
                 save_cache(cat);
             }
             send(Msg::Done(
-                result
-                    .map(Box::new)
-                    .map_err(|e| format!("Could not read StarCraft II data: {e}")),
+                result.map(Box::new).map_err(|e| format!("Could not read StarCraft II data: {e}")),
                 Source::Install,
             ));
-        });
-        Ok(())
+        }
+        send(Msg::Assets(crate::assets::AssetSource::Web(Box::new(storage), name)));
     }
 }

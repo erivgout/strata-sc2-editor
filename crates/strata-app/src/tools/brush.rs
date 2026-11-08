@@ -42,6 +42,14 @@ pub fn dab_positions(from: Vec2, to: Vec2, spacing: f32, carry: &mut f32) -> Vec
     out
 }
 
+/// How far one Raise / Lower stroke may move the ground at the brush
+/// center: a little over one cliff level (2 units) at the default strength,
+/// four at full strength. Holding the button still stops there instead of
+/// growing a spike.
+pub fn stroke_height_cap(strength: f32) -> f32 {
+    1.0 + 7.0 * strength.clamp(0.0, 1.0)
+}
+
 /// Dab spacing for a brush radius.
 pub fn spacing_for(radius: f32) -> f32 {
     (radius * 0.25).max(0.25)
@@ -178,6 +186,9 @@ impl ToolState {
         }
         state.brush.tool = tool;
         let mut stroke = Stroke::begin(&state.doc.terrain, brush);
+        if matches!(tool, BrushTool::Raise | BrushTool::Lower) {
+            stroke = stroke.with_height_cap(stroke_height_cap(state.brush.strength));
+        }
         let r = stroke.dab(&mut state.doc.terrain, at);
         if !r.is_empty() {
             self.frame_dirty = Some(self.frame_dirty.unwrap_or(empty_rect()).union(&r));
@@ -292,6 +303,22 @@ mod tests {
         let mut carry = 0.3;
         assert!(dab_positions(Vec2::ONE, Vec2::ONE, 1.0, &mut carry).is_empty());
         assert_eq!(carry, 0.3);
+    }
+
+    #[test]
+    fn holding_raise_still_makes_a_bounded_hill() {
+        let mut t = Terrain::new(32, 32);
+        let i = t.vertex_index(16, 16);
+        let h0 = t.heights[i];
+        let b = Brush::default();
+        let cap = stroke_height_cap(b.strength);
+        assert!(cap > 2.0 && cap < 4.0, "{cap}");
+        let mut s = Stroke::begin(&t, Brush { strength: b.strength * FLOW, ..b }).with_height_cap(cap);
+        // Five seconds of airbrush at the still rate.
+        for _ in 0..(5.0 * STILL_RATE) as usize {
+            s.dab(&mut t, Vec2::new(16.0, 16.0));
+        }
+        assert!((t.heights[i] - h0 - cap).abs() < 1e-3);
     }
 
     #[test]

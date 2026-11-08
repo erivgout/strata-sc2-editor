@@ -11,6 +11,8 @@ use eframe::egui_glow;
 use glam::{Mat4, Vec3};
 use glow::HasContext as _;
 
+use super::textures::{LayerUpload, TEX_SIZE};
+
 /// Direction toward the key light: from the west-north-west (upper left with
 /// the default north-up camera) 40 degrees above the horizon, so slopes facing
 /// the default camera still catch some light. Shared with the minimap so both
@@ -26,6 +28,8 @@ pub struct Uploads {
     pub rows: Vec<(usize, Vec<u8>)>,
     /// Per-cell pathing flags (width, height, data).
     pub pathing: Option<(u32, u32, Vec<u8>)>,
+    /// Terrain textures that arrived, for the texture arrays.
+    pub layers: Vec<LayerUpload>,
 }
 
 pub struct FullUpload {
@@ -53,6 +57,11 @@ pub struct FrameParams {
     pub unbuildable: [f32; 4],
     pub nofly: [f32; 4],
     pub water_color: [f32; 4],
+    /// Per texture layer: placeholder color (rgb) and flags (a), see
+    /// [`super::textures::HAS_DIFFUSE`].
+    pub layers: [[f32; 4]; 8],
+    /// Texture repeats per cell.
+    pub tex_scale: f32,
 }
 
 /// State shared between the UI thread and the paint callback.
@@ -123,6 +132,10 @@ struct Gpu {
     u_unbuild: Option<glow::UniformLocation>,
     u_nofly: Option<glow::UniformLocation>,
     u_fog: Option<glow::UniformLocation>,
+    u_diffuse: Option<glow::UniformLocation>,
+    u_normals: Option<glow::UniformLocation>,
+    u_layers: Option<glow::UniformLocation>,
+    u_tex: Option<glow::UniformLocation>,
     water: glow::Program,
     w_view_proj: Option<glow::UniformLocation>,
     w_rect: Option<glow::UniformLocation>,
@@ -138,6 +151,9 @@ struct Gpu {
     vbo_bytes: usize,
     path_tex: glow::Texture,
     path_size: (u32, u32),
+    /// Diffuse and normal maps of the texture layers, one slot per layer.
+    diffuse_arr: glow::Texture,
+    normal_arr: glow::Texture,
     targets: Option<Targets>,
     max_samples: i32,
 }
@@ -146,16 +162,22 @@ const TERRAIN_VS: &str = r#"
 in vec3 a_pos;
 in vec3 a_normal;
 in vec4 a_color;
+in vec4 a_w0;
+in vec4 a_w1;
 uniform mat4 u_view_proj;
 out vec3 v_world;
 out vec3 v_normal;
 out vec3 v_color;
 out float v_cliff;
+out vec4 v_w0;
+out vec4 v_w1;
 void main() {
     v_world = a_pos;
     v_normal = a_normal;
     v_color = a_color.rgb;
     v_cliff = a_color.a * 255.0 / 16.0;
+    v_w0 = a_w0;
+    v_w1 = a_w1;
     gl_Position = u_view_proj * vec4(a_pos, 1.0);
 }
 "#;
@@ -165,6 +187,8 @@ in vec3 v_world;
 in vec3 v_normal;
 in vec3 v_color;
 in float v_cliff;
+in vec4 v_w0;
+in vec4 v_w1;
 uniform vec3 u_sun;
 uniform vec3 u_eye;
 uniform vec2 u_map;
@@ -180,6 +204,13 @@ uniform vec4 u_unbuild;
 uniform vec4 u_nofly;
 // rgb: fog color, a: fog start distance
 uniform vec4 u_fog;
+// The game's terrain textures, one array slot per layer.
+uniform sampler2DArray u_diffuse;
+uniform sampler2DArray u_normals;
+// Per layer: placeholder color (rgb), flags (a): 1 diffuse, 2 normal map.
+uniform vec4 u_layers[8];
+// x: texture repeats per cell, y: diffuse gain
+uniform vec2 u_tex;
 out vec4 o_color;
 
 float hash12(vec2 p) {
@@ -219,23 +250,83 @@ vec3 cliff_color(float level) {
 
 void main() {
     vec3 n = normalize(v_normal);
-    vec3 base = v_color;
 
-    // Procedural grain so flat textures do not read as plastic.
+    // Blend the layers: real textures where loaded, placeholder colors
+    // elsewhere. Gradients are taken once, outside the per-layer branches.
+    vec2 uv = v_world.xy * u_tex.x;
+    vec2 gx = dFdx(uv);
+    vec2 gy = dFdy(uv);
+    // Steep faces (cliff walls, drawn without the game's cliff meshes) also
+    // sample side projections so the textures don't smear down the wall.
+    vec2 uvx = v_world.yz * u_tex.x;
+    vec2 uvy = v_world.xz * u_tex.x;
+    vec2 gxx = dFdx(uvx);
+    vec2 gyx = dFdy(uvx);
+    vec2 gxy = dFdx(uvy);
+    vec2 gyy = dFdy(uvy);
+    vec3 tri = pow(abs(n), vec3(4.0));
+    tri /= tri.x + tri.y + tri.z;
+    tri = mix(tri, vec3(0.0), step(tri, vec3(0.03)));
+    tri /= max(tri.x + tri.y + tri.z, 1e-4);
+    float w[8];
+    w[0] = v_w0.x; w[1] = v_w0.y; w[2] = v_w0.z; w[3] = v_w0.w;
+    w[4] = v_w1.x; w[5] = v_w1.y; w[6] = v_w1.z; w[7] = v_w1.w;
+    vec3 tex = vec3(0.0);
+    vec3 flat_col = vec3(0.0);
+    float flat_w = 0.0;
+    vec2 bump = vec2(0.0);
+    float total = 0.0;
+    for (int i = 0; i < 8; i++) {
+        float wi = w[i];
+        if (wi < 0.002) continue;
+        total += wi;
+        vec4 layer = u_layers[i];
+        int flags = int(layer.a + 0.5);
+        if ((flags & 1) != 0) {
+            float s = float(i);
+            vec3 c = vec3(0.0);
+            if (tri.z > 0.0) c += textureGrad(u_diffuse, vec3(uv, s), gx, gy).rgb * tri.z;
+            if (tri.x > 0.0) c += textureGrad(u_diffuse, vec3(uvx, s), gxx, gyx).rgb * tri.x;
+            if (tri.y > 0.0) c += textureGrad(u_diffuse, vec3(uvy, s), gxy, gyy).rgb * tri.y;
+            tex += c * wi;
+        } else {
+            flat_col += layer.rgb * wi;
+            flat_w += wi;
+        }
+        if ((flags & 2) != 0 && tri.z > 0.0) {
+            vec4 nm = textureGrad(u_normals, vec3(uv, float(i)), gx, gy);
+            bump += (vec2(nm.a, nm.g) * 2.0 - 1.0) * wi * tri.z;
+        }
+    }
+    total = max(total, 1e-4);
+    // Share of the surface still painted with placeholder colors.
+    float placeholder = flat_w / total;
+
+    // Procedural grain so placeholder colors do not read as plastic.
     float g = vnoise(v_world.xy * 1.3) * 0.6 + vnoise(v_world.xy * 5.1) * 0.4;
-    base *= 0.92 + 0.16 * g;
+    vec3 base = (tex * u_tex.y + flat_col * (0.92 + 0.16 * g)) / total;
 
     if (u_toggles.z > 0.5) {
         base = mix(base, cliff_color(floor(v_cliff + 0.5)), 0.6);
     }
 
     // Slope tint: gentle slopes pick up a little warmth, steep faces turn
-    // cooler and greyer, like exposed rock.
+    // cooler and greyer, like exposed rock. Real textures get only a hint.
     float slope = 1.0 - n.z;
     float lum = dot(base, vec3(0.299, 0.587, 0.114));
     float rock = smoothstep(0.18, 0.62, slope);
-    base = mix(base, base * vec3(1.06, 1.0, 0.92), smoothstep(0.02, 0.18, slope) * (1.0 - rock));
-    base = mix(base, vec3(lum * 1.08) * vec3(0.97, 0.96, 0.95), rock * 0.6);
+    float tint = mix(0.25, 1.0, placeholder);
+    base = mix(base, base * vec3(1.06, 1.0, 0.92), smoothstep(0.02, 0.18, slope) * (1.0 - rock) * tint);
+    base = mix(base, vec3(lum * 1.08) * vec3(0.97, 0.96, 0.95), rock * 0.6 * tint);
+
+    // Normal maps tilt the shading normal in the ground plane (DirectX
+    // convention: +x along u, +y along v, which follow world x and y).
+    if (bump != vec2(0.0)) {
+        vec3 t = normalize(vec3(1.0, 0.0, 0.0) - n * n.x);
+        vec3 b = cross(n, t);
+        bump /= total;
+        n = normalize(n + t * bump.x + b * bump.y);
+    }
 
     // Subtle height shading: valleys a touch darker, peaks a touch lighter.
     float span = u_height.y - u_height.x;
@@ -252,6 +343,10 @@ void main() {
     // Slightly wrapped diffuse softens the terminator without flattening relief.
     float diff = clamp((ndl + 0.1) / 1.1, 0.0, 1.0);
     vec3 lit = base * (ambient + vec3(1.0, 0.94, 0.84) * diff * 0.86);
+    // Soft shoulder: bright textures (Elsecaro, snow) keep their detail
+    // instead of clipping to white.
+    vec3 hi = 0.75 + 0.25 * (1.0 - exp(-(lit - 0.75) * 4.0));
+    lit = mix(lit, hi, step(vec3(0.75), lit));
 
     if (u_toggles.y > 0.5) {
         float minor = grid_line(v_world.z, 1.0);
@@ -355,10 +450,50 @@ void main() {
 }
 "#;
 
+/// SC2's terrain textures are authored dark and brightened by the game's
+/// lighting; this lifts them to read like the editor's default lighting.
+const TEXTURE_GAIN: f32 = 1.0;
+
+/// A `TEX_SIZE`² x 8 RGBA texture array with mipmaps, repeating, filtered
+/// anisotropically where the driver allows.
+unsafe fn layer_array(gl: &glow::Context, aniso: Option<f32>) -> Result<glow::Texture, String> {
+    unsafe {
+        let t = gl.create_texture()?;
+        gl.bind_texture(glow::TEXTURE_2D_ARRAY, Some(t));
+        let side = TEX_SIZE as i32;
+        gl.tex_image_3d(
+            glow::TEXTURE_2D_ARRAY,
+            0,
+            glow::RGBA8 as i32,
+            side,
+            side,
+            8,
+            0,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelUnpackData::Slice(None),
+        );
+        for (p, v) in [
+            (glow::TEXTURE_MIN_FILTER, glow::LINEAR_MIPMAP_LINEAR),
+            (glow::TEXTURE_MAG_FILTER, glow::LINEAR),
+            (glow::TEXTURE_WRAP_S, glow::REPEAT),
+            (glow::TEXTURE_WRAP_T, glow::REPEAT),
+        ] {
+            gl.tex_parameter_i32(glow::TEXTURE_2D_ARRAY, p, v as i32);
+        }
+        if let Some(a) = aniso {
+            gl.tex_parameter_f32(glow::TEXTURE_2D_ARRAY, glow::TEXTURE_MAX_ANISOTROPY_EXT, a);
+        }
+        gl.generate_mipmap(glow::TEXTURE_2D_ARRAY);
+        gl.bind_texture(glow::TEXTURE_2D_ARRAY, None);
+        Ok(t)
+    }
+}
+
 fn header(gl: &glow::Context) -> Result<&'static str, String> {
     match egui_glow::ShaderVersion::get(gl) {
         egui_glow::ShaderVersion::Es300 => {
-            Ok("#version 300 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;\n")
+            Ok("#version 300 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;\nprecision highp sampler2DArray;\n")
         }
         egui_glow::ShaderVersion::Gl140 => Ok("#version 140\n"),
         v => Err(format!("The 3D view needs WebGL 2 or OpenGL 3.1 (found {v:?}).")),
@@ -404,7 +539,8 @@ impl Gpu {
     unsafe fn new(gl: &glow::Context) -> Result<Self, String> {
         unsafe {
             let hdr = header(gl)?;
-            let terrain = compile(gl, hdr, TERRAIN_VS, TERRAIN_FS, &["a_pos", "a_normal", "a_color"])?;
+            let terrain =
+                compile(gl, hdr, TERRAIN_VS, TERRAIN_FS, &["a_pos", "a_normal", "a_color", "a_w0", "a_w1"])?;
             let water = compile(gl, hdr, WATER_VS, WATER_FS, &[])?;
             let blit = compile(gl, hdr, BLIT_VS, BLIT_FS, &[])?;
             let u = |p: glow::Program, n: &str| gl.get_uniform_location(p, n);
@@ -423,6 +559,10 @@ impl Gpu {
             gl.vertex_attrib_pointer_f32(1, 3, glow::FLOAT, false, stride, 12);
             gl.enable_vertex_attrib_array(2);
             gl.vertex_attrib_pointer_f32(2, 4, glow::UNSIGNED_BYTE, true, stride, 24);
+            gl.enable_vertex_attrib_array(3);
+            gl.vertex_attrib_pointer_f32(3, 4, glow::UNSIGNED_BYTE, true, stride, 28);
+            gl.enable_vertex_attrib_array(4);
+            gl.vertex_attrib_pointer_f32(4, 4, glow::UNSIGNED_BYTE, true, stride, 32);
             gl.bind_vertex_array(None);
             gl.bind_buffer(glow::ARRAY_BUFFER, None);
 
@@ -451,6 +591,14 @@ impl Gpu {
             gl.bind_texture(glow::TEXTURE_2D, None);
 
             let max_samples = gl.get_parameter_i32(glow::MAX_SAMPLES).clamp(0, 4);
+            let aniso = gl
+                .supported_extensions()
+                .iter()
+                .any(|e| e.ends_with("texture_filter_anisotropic"))
+                .then(|| gl.get_parameter_f32(glow::MAX_TEXTURE_MAX_ANISOTROPY_EXT).min(8.0))
+                .filter(|a| *a > 1.0);
+            let diffuse_arr = layer_array(gl, aniso)?;
+            let normal_arr = layer_array(gl, aniso)?;
 
             Ok(Self {
                 u_view_proj: u(terrain, "u_view_proj"),
@@ -466,6 +614,10 @@ impl Gpu {
                 u_unbuild: u(terrain, "u_unbuild"),
                 u_nofly: u(terrain, "u_nofly"),
                 u_fog: u(terrain, "u_fog"),
+                u_diffuse: u(terrain, "u_diffuse"),
+                u_normals: u(terrain, "u_normals"),
+                u_layers: u(terrain, "u_layers"),
+                u_tex: u(terrain, "u_tex"),
                 terrain,
                 w_view_proj: u(water, "u_view_proj"),
                 w_rect: u(water, "u_rect"),
@@ -482,6 +634,8 @@ impl Gpu {
                 vbo_bytes: 0,
                 path_tex,
                 path_size: (1, 1),
+                diffuse_arr,
+                normal_arr,
                 targets: None,
                 max_samples,
             })
@@ -545,6 +699,39 @@ impl Gpu {
                     self.path_size = (w, h);
                 }
                 gl.bind_texture(glow::TEXTURE_2D, None);
+            }
+            if !up.layers.is_empty() {
+                let mut touched = [false; 2];
+                gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 4);
+                for l in up.layers.drain(..) {
+                    let side = TEX_SIZE as i32;
+                    if l.slot >= 8 || l.rgba.len() != (side * side * 4) as usize {
+                        continue;
+                    }
+                    let arr = if l.normal { self.normal_arr } else { self.diffuse_arr };
+                    touched[l.normal as usize] = true;
+                    gl.bind_texture(glow::TEXTURE_2D_ARRAY, Some(arr));
+                    gl.tex_sub_image_3d(
+                        glow::TEXTURE_2D_ARRAY,
+                        0,
+                        0,
+                        0,
+                        l.slot as i32,
+                        side,
+                        side,
+                        1,
+                        glow::RGBA,
+                        glow::UNSIGNED_BYTE,
+                        glow::PixelUnpackData::Slice(Some(&l.rgba)),
+                    );
+                }
+                for (i, arr) in [self.diffuse_arr, self.normal_arr].into_iter().enumerate() {
+                    if touched[i] {
+                        gl.bind_texture(glow::TEXTURE_2D_ARRAY, Some(arr));
+                        gl.generate_mipmap(glow::TEXTURE_2D_ARRAY);
+                    }
+                }
+                gl.bind_texture(glow::TEXTURE_2D_ARRAY, None);
             }
         }
     }
@@ -715,12 +902,25 @@ impl Gpu {
                 v4(self.u_nofly.as_ref(), p.nofly);
                 let fog_start = p.map_size[0].max(p.map_size[1]) * 1.2;
                 gl.uniform_4_f32(self.u_fog.as_ref(), p.clear[0], p.clear[1], p.clear[2], fog_start);
+                let layers: Vec<f32> = p.layers.iter().flatten().copied().collect();
+                gl.uniform_4_f32_slice(self.u_layers.as_ref(), &layers);
+                gl.uniform_2_f32(self.u_tex.as_ref(), p.tex_scale, TEXTURE_GAIN);
                 gl.active_texture(glow::TEXTURE0);
                 gl.bind_texture(glow::TEXTURE_2D, Some(self.path_tex));
                 gl.uniform_1_i32(self.u_path.as_ref(), 0);
+                gl.active_texture(glow::TEXTURE1);
+                gl.bind_texture(glow::TEXTURE_2D_ARRAY, Some(self.diffuse_arr));
+                gl.uniform_1_i32(self.u_diffuse.as_ref(), 1);
+                gl.active_texture(glow::TEXTURE2);
+                gl.bind_texture(glow::TEXTURE_2D_ARRAY, Some(self.normal_arr));
+                gl.uniform_1_i32(self.u_normals.as_ref(), 2);
                 gl.bind_vertex_array(Some(self.vao));
                 gl.draw_elements(glow::TRIANGLES, self.index_count, glow::UNSIGNED_INT, 0);
                 gl.bind_vertex_array(None);
+                gl.bind_texture(glow::TEXTURE_2D_ARRAY, None);
+                gl.active_texture(glow::TEXTURE1);
+                gl.bind_texture(glow::TEXTURE_2D_ARRAY, None);
+                gl.active_texture(glow::TEXTURE0);
             }
 
             if let Some(z) = p.water {
