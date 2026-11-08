@@ -277,6 +277,12 @@ impl Assets {
         g.resolved.clear();
         g.terrain = None;
         g.waiting.clear();
+        // Loads of the old source drop their results without touching the
+        // new source's slot count.
+        #[cfg(target_arch = "wasm32")]
+        {
+            g.in_flight = 0;
+        }
         g.revision += 1;
         match source {
             #[cfg(not(target_arch = "wasm32"))]

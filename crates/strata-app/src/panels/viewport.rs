@@ -179,6 +179,9 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState) {
     }
     let layers = state.ui.viewport.renderer.prepare_textures(&state.assets, &state.doc.terrain);
     let mut models = std::mem::take(&mut state.ui.viewport.models);
+    if new_doc {
+        models.reset(&state.ui.viewport.renderer.shared);
+    }
     models.prepare(&ctx, state, &view, &state.ui.viewport.renderer.shared);
     state.ui.viewport.models = models;
 

@@ -158,9 +158,10 @@ fn decode_raw(data: &[u8], w: u32, h: u32, format: Format) -> Result<Image, DdsE
                 if mask == 0 {
                     return 255;
                 }
+                // u64: a full 32-bit mask times 255 overflows u32.
                 let shift = mask.trailing_zeros();
-                let max = mask >> shift;
-                (((px & mask) >> shift) * 255 / max.max(1)) as u8
+                let max = u64::from(mask >> shift);
+                (u64::from((px & mask) >> shift) * 255 / max.max(1)) as u8
             };
             for p in data.chunks_exact(bpp as usize).take(wu * hu) {
                 let px = match bpp {
@@ -252,6 +253,18 @@ mod tests {
         b[104..108].copy_from_slice(&0xFF00_0000u32.to_le_bytes());
         b.extend_from_slice(&[0x10, 0x20, 0x30, 0x40]); // B, G, R, A
         assert_eq!(decode(&b).unwrap().rgba, vec![0x30, 0x20, 0x10, 0x40]);
+    }
+
+    #[test]
+    fn full_width_masks_do_not_overflow() {
+        let mut b = header(1, 1, 1, b"\0\0\0\0");
+        b[80..84].copy_from_slice(&(DDPF_RGB | DDPF_ALPHAPIXELS).to_le_bytes());
+        b[88..92].copy_from_slice(&32u32.to_le_bytes());
+        for off in [92, 96, 100, 104] {
+            b[off..off + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        }
+        b.extend_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(decode(&b).unwrap().rgba, vec![255, 255, 255, 255]);
     }
 
     #[test]

@@ -73,11 +73,13 @@ struct Fixture {
     batch_visible: bool,
     /// Bind the batch to bone 0.
     batch_bone: bool,
+    /// Number of identical (fully overlapping) regions, each with a batch.
+    regions: u16,
 }
 
 impl Default for Fixture {
     fn default() -> Self {
-        Fixture { bone_offset: [0.0; 3], batch_visible: true, batch_bone: false }
+        Fixture { bone_offset: [0.0; 3], batch_visible: true, batch_bone: false, regions: 1 }
     }
 }
 
@@ -118,12 +120,18 @@ fn quad(opt: &Fixture) -> Vec<u8> {
     put(&mut regn, 28, &1u16.to_le_bytes()); // bone lookup count
     regn[32] = 1; // lookups used
     put(&mut regn, 40, &f(16.0));
-    let rref = b.add(b"REGN", 5, 1, &regn);
+    let regns: Vec<u8> = (0..opt.regions).flat_map(|_| regn).collect();
+    let rref = b.add(b"REGN", 5, opt.regions as u32, &regns);
 
-    let mut bat = [0u8; 14];
-    let bone: i16 = if opt.batch_bone { 0 } else { -1 };
-    put(&mut bat, 12, &bone.to_le_bytes());
-    let bref = b.add(b"BAT_", 1, 1, &bat);
+    let mut bats = Vec::new();
+    for r in 0..opt.regions {
+        let mut bat = [0u8; 14];
+        put(&mut bat, 4, &r.to_le_bytes());
+        let bone: i16 = if opt.batch_bone { 0 } else { -1 };
+        put(&mut bat, 12, &bone.to_le_bytes());
+        bats.extend_from_slice(&bat);
+    }
+    let bref = b.add(b"BAT_", 1, opt.regions as u32, &bats);
 
     let mut div = [0u8; 52];
     put(&mut div, 0, &fref);
@@ -253,6 +261,14 @@ fn batches_on_hidden_bones_are_skipped() {
     assert_eq!(shown.submeshes.len(), 1);
     let hidden = parse(&quad(&Fixture { batch_bone: true, batch_visible: false, ..Fixture::default() })).unwrap();
     assert!(hidden.submeshes.is_empty());
+}
+
+#[test]
+fn overlapping_regions_cannot_expand_without_bound() {
+    // Every region covers the same two triangles (6 indices each).
+    let ok = parse(&quad(&Fixture { regions: 50, ..Default::default() })).unwrap();
+    assert_eq!(ok.indices.len(), 300);
+    assert!(parse(&quad(&Fixture { regions: 120, ..Default::default() })).is_err());
 }
 
 #[test]

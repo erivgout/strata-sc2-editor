@@ -218,6 +218,21 @@ pub fn dependency_roots(deps: &[String]) -> Vec<String> {
 }
 
 impl ModelRenderer {
+    /// Forget everything loaded for the previous map and free its GPU
+    /// meshes and textures. Id counters keep running so no stale upload can
+    /// alias a new id.
+    pub fn reset(&mut self, shared: &SharedHandle) {
+        let (next_gpu, next_tex) = (self.next_gpu, self.next_tex);
+        *self = Self { next_gpu, next_tex, ..Self::default() };
+        if let Ok(mut s) = shared.lock() {
+            let pass = &mut s.models;
+            pass.mesh_uploads.clear();
+            pass.texture_uploads.clear();
+            pass.frame = FrameDraws::default();
+            pass.release_all = true;
+        }
+    }
+
     /// Resolve, load and lay out this frame's models, and hand the draws to
     /// the GPU pass in `shared`.
     pub fn prepare(&mut self, ctx: &egui::Context, state: &EditorState, view: &View, shared: &SharedHandle) {
@@ -973,6 +988,8 @@ pub struct ModelPass {
     mesh_uploads: Vec<MeshUpload>,
     texture_uploads: Vec<TextureUpload>,
     frame: FrameDraws,
+    /// Free every mesh and texture at the next paint (a new map was opened).
+    release_all: bool,
 }
 
 /// Uploads done per paint at most, so a burst of new models spreads over frames.
@@ -1139,6 +1156,16 @@ impl ModelPass {
 
     unsafe fn upload(&mut self, gl: &glow::Context) {
         unsafe {
+            if std::mem::take(&mut self.release_all) {
+                for (_, m) in self.meshes.drain() {
+                    gl.delete_vertex_array(m.vao);
+                    gl.delete_buffer(m.vbo);
+                    gl.delete_buffer(m.ibo);
+                }
+                for (_, t) in self.textures.drain() {
+                    gl.delete_texture(t);
+                }
+            }
             let mut budget = UPLOADS_PER_FRAME;
             while budget > 0 {
                 let Some(m) = self.mesh_uploads.pop() else { break };

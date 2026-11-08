@@ -236,6 +236,12 @@ const T_IREF: [u8; 4] = tag(b"IREF");
 
 /// Upper bound for any element count, against absurd allocations.
 const MAX_ITEMS: usize = 1 << 24;
+/// Cap on emitted triangle indices across all regions (SC2's largest models
+/// have well under a million). Tiny under test so the limit is testable.
+#[cfg(not(test))]
+const MAX_INDICES: usize = 3 << 20;
+#[cfg(test)]
+const MAX_INDICES: usize = 600;
 
 #[derive(Debug, Clone, Copy)]
 struct Entry {
@@ -517,6 +523,12 @@ impl<'a> File<'a> {
                         let [a, b, c] = tri.map(|x| positions[x]);
                         if (b - a).cross(c - a).length_squared() < 1e-14 {
                             continue;
+                        }
+                        // Regions may overlap, so bound the total output
+                        // rather than each region (hostile files could
+                        // otherwise expand a small model without limit).
+                        if indices.len() + 3 > MAX_INDICES {
+                            return Err(corrupt("model has too many triangles"));
                         }
                         for &x in &tri {
                             used[x] = true;
