@@ -55,4 +55,4 @@ foreach ($f in $files) {
 if (-not $Notes) { $Notes = "Strata v$Version" }
 gh release create "v$Version" @assets --repo erivgout/strata-sc2-editor --title "Strata v$Version" --notes $Notes --target main
 if ($LASTEXITCODE -ne 0) { throw "gh release create failed" }
-Write-Host "Released v$Version: https://github.com/erivgout/strata-sc2-editor/releases/tag/v$Version"
+Write-Host "Released v${Version}: https://github.com/erivgout/strata-sc2-editor/releases/tag/v$Version"
