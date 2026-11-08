@@ -557,7 +557,11 @@ mod transport {
             let _ = ev.send(e);
             ctx.request_repaint();
         };
-        let mut ws = match tungstenite::connect(url) {
+        let max = strata_core::ops::link::MAX_MESSAGE_BYTES;
+        let config = tungstenite::protocol::WebSocketConfig::default()
+            .max_message_size(Some(max))
+            .max_frame_size(Some(max));
+        let mut ws = match tungstenite::client::connect_with_config(url, Some(config), 3) {
             Ok((ws, _)) => ws,
             Err(e) => return notify(Event::Closed(Some(e.to_string()))),
         };

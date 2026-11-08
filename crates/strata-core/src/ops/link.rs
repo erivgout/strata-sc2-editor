@@ -25,6 +25,9 @@ pub const PROTOCOL: u32 = 1;
 pub const DEFAULT_WS_URL: &str = "ws://127.0.0.1:7342";
 pub const DEFAULT_WS_ADDR: &str = "127.0.0.1:7342";
 pub const DEFAULT_HTTP_ADDR: &str = "127.0.0.1:7341";
+/// Largest live-link message either side accepts. Whole documents travel
+/// over the link (map_open, map_save), so this is far above the usual 64 MiB.
+pub const MAX_MESSAGE_BYTES: usize = 512 << 20;
 
 /// Error an editor returns for edits while "Allow AI edits" is off.
 pub const EDITS_DISABLED: &str =

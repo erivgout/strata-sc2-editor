@@ -187,7 +187,10 @@ impl Bridge {
                 Err(r)
             }
         };
-        let mut ws = match tungstenite::accept_hdr(stream, check) {
+        let config = tungstenite::protocol::WebSocketConfig::default()
+            .max_message_size(Some(link::MAX_MESSAGE_BYTES))
+            .max_frame_size(Some(link::MAX_MESSAGE_BYTES));
+        let mut ws = match tungstenite::accept_hdr_with_config(stream, check, Some(config)) {
             Ok(ws) => ws,
             Err(e) => {
                 log!("live link: handshake failed: {e}");
