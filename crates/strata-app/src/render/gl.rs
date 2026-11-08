@@ -256,6 +256,18 @@ void main() {
     vec2 uv = v_world.xy * u_tex.x;
     vec2 gx = dFdx(uv);
     vec2 gy = dFdy(uv);
+    // Steep faces (cliff walls, drawn without the game's cliff meshes) also
+    // sample side projections so the textures don't smear down the wall.
+    vec2 uvx = v_world.yz * u_tex.x;
+    vec2 uvy = v_world.xz * u_tex.x;
+    vec2 gxx = dFdx(uvx);
+    vec2 gyx = dFdy(uvx);
+    vec2 gxy = dFdx(uvy);
+    vec2 gyy = dFdy(uvy);
+    vec3 tri = pow(abs(n), vec3(4.0));
+    tri /= tri.x + tri.y + tri.z;
+    tri = mix(tri, vec3(0.0), step(tri, vec3(0.03)));
+    tri /= max(tri.x + tri.y + tri.z, 1e-4);
     float w[8];
     w[0] = v_w0.x; w[1] = v_w0.y; w[2] = v_w0.z; w[3] = v_w0.w;
     w[4] = v_w1.x; w[5] = v_w1.y; w[6] = v_w1.z; w[7] = v_w1.w;
@@ -271,14 +283,19 @@ void main() {
         vec4 layer = u_layers[i];
         int flags = int(layer.a + 0.5);
         if ((flags & 1) != 0) {
-            tex += textureGrad(u_diffuse, vec3(uv, float(i)), gx, gy).rgb * wi;
+            float s = float(i);
+            vec3 c = vec3(0.0);
+            if (tri.z > 0.0) c += textureGrad(u_diffuse, vec3(uv, s), gx, gy).rgb * tri.z;
+            if (tri.x > 0.0) c += textureGrad(u_diffuse, vec3(uvx, s), gxx, gyx).rgb * tri.x;
+            if (tri.y > 0.0) c += textureGrad(u_diffuse, vec3(uvy, s), gxy, gyy).rgb * tri.y;
+            tex += c * wi;
         } else {
             flat_col += layer.rgb * wi;
             flat_w += wi;
         }
-        if ((flags & 2) != 0) {
+        if ((flags & 2) != 0 && tri.z > 0.0) {
             vec4 nm = textureGrad(u_normals, vec3(uv, float(i)), gx, gy);
-            bump += (vec2(nm.a, nm.g) * 2.0 - 1.0) * wi;
+            bump += (vec2(nm.a, nm.g) * 2.0 - 1.0) * wi * tri.z;
         }
     }
     total = max(total, 1e-4);

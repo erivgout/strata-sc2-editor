@@ -595,7 +595,9 @@ mod native {
                     q = cv.wait(q).unwrap_or_else(|e| e.into_inner());
                 }
             };
+            let t = std::time::Instant::now();
             let out = block_on(run(&store, &job));
+            log::debug!("loaded {job:?} in {:?}", t.elapsed());
             let mut g = lock(&inner);
             if g.epoch != epoch {
                 return;
