@@ -203,8 +203,9 @@ pub fn dab(terrain: &mut Terrain, brush: &Brush, center: glam::Vec2) -> VertexRe
                     let cur = terrain.layers[layer].weights[i] as i32;
                     let next = if erase { cur - amount } else { cur + amount };
                     terrain.layers[layer].weights[i] = next.clamp(0, 255) as u8;
-                    if !erase && layer > 0 {
-                        // Painting a layer pushes the layers above it down so it shows through.
+                    if !erase {
+                        // Painting a layer pushes the layers above it down so it shows
+                        // through (for the base layer this uncovers it).
                         for above in layer + 1..terrain.layers.len() {
                             let a = terrain.layers[above].weights[i] as i32;
                             terrain.layers[above].weights[i] = (a - amount).clamp(0, 255) as u8;
@@ -327,5 +328,17 @@ mod tests {
         dab(&mut t, &b, glam::Vec2::new(4.0, 4.0));
         assert_eq!(t.cliff_levels[i], 3);
         assert_eq!(t.heights[i], h + CLIFF_LEVEL_HEIGHT);
+    }
+
+    #[test]
+    fn painting_base_layer_uncovers_it() {
+        let mut t = Terrain::new(8, 8);
+        let n = t.heights.len();
+        t.layers.push(crate::terrain::TextureLayer { texture: "Grass".into(), weights: vec![255; n] });
+        let i = t.vertex_index(4, 4);
+        assert_eq!(t.blended_weights(i)[0], 0.0);
+        let b = Brush { tool: BrushTool::Paint { layer: 0 }, radius: 2.0, strength: 1.0, ..Default::default() };
+        dab(&mut t, &b, glam::Vec2::new(4.0, 4.0));
+        assert!(t.blended_weights(i)[0] > 0.9);
     }
 }

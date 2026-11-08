@@ -1,0 +1,738 @@
+//! GPU side of the terrain viewport (glow: WebGL2 on web, GL 3.x native).
+//!
+//! The terrain is drawn into an offscreen framebuffer with a depth buffer
+//! (multisampled when the driver allows it), resolved, and composited into
+//! egui's framebuffer by a fullscreen triangle. This keeps depth testing and
+//! MSAA independent of how eframe's own framebuffer was created.
+
+use std::sync::{Arc, Mutex};
+
+use eframe::egui_glow;
+use glam::{Mat4, Vec3};
+use glow::HasContext as _;
+
+/// Pending uploads queued by the UI thread, consumed by the paint callback.
+#[derive(Default)]
+pub struct Uploads {
+    /// Replace the whole mesh (first frame, load, resize).
+    pub full: Option<FullUpload>,
+    /// (byte offset, bytes) ranges of the vertex buffer.
+    pub rows: Vec<(usize, Vec<u8>)>,
+    /// Per-cell pathing flags (width, height, data).
+    pub pathing: Option<(u32, u32, Vec<u8>)>,
+}
+
+pub struct FullUpload {
+    pub vertices: Vec<u8>,
+    pub indices: Vec<u32>,
+}
+
+/// Everything the shaders need for one frame. Colors are sRGB 0..1.
+#[derive(Debug, Clone, Copy)]
+pub struct FrameParams {
+    pub view_proj: Mat4,
+    pub eye: Vec3,
+    pub map_size: [f32; 2],
+    pub playable: [f32; 4],
+    pub water: Option<f32>,
+    pub show_grid: bool,
+    pub show_contours: bool,
+    pub cliff_tint: bool,
+    pub show_pathing: bool,
+    pub clear: [f32; 4],
+    pub bounds_color: [f32; 4],
+    pub unwalkable: [f32; 4],
+    pub unbuildable: [f32; 4],
+    pub nofly: [f32; 4],
+    pub water_color: [f32; 4],
+}
+
+/// State shared between the UI thread and the paint callback.
+#[derive(Default)]
+pub struct Shared {
+    gpu: Option<Gpu>,
+    pub uploads: Uploads,
+    /// Set when GL setup failed; shown in the viewport.
+    pub error: Option<String>,
+    /// Number of MSAA samples in use (0 = none), for diagnostics.
+    pub samples: i32,
+}
+
+pub type SharedHandle = Arc<Mutex<Shared>>;
+
+/// Build the paint callback for one frame.
+pub fn callback(shared: SharedHandle, rect: egui::Rect, params: FrameParams) -> egui::PaintCallback {
+    egui::PaintCallback {
+        rect,
+        callback: Arc::new(egui_glow::CallbackFn::new(move |info, painter| {
+            let Ok(mut s) = shared.lock() else { return };
+            let gl = painter.gl();
+            if s.gpu.is_none() && s.error.is_none() {
+                match unsafe { Gpu::new(gl) } {
+                    Ok(g) => {
+                        s.samples = g.max_samples;
+                        s.gpu = Some(g);
+                    }
+                    Err(e) => {
+                        log::error!("terrain renderer: {e}");
+                        s.error = Some(e);
+                    }
+                }
+            }
+            let Shared { gpu, uploads, .. } = &mut *s;
+            if let Some(g) = gpu.as_mut() {
+                unsafe {
+                    g.upload(gl, uploads);
+                    g.paint(gl, &info, &params, painter.intermediate_fbo());
+                }
+            }
+        })),
+    }
+}
+
+struct Targets {
+    w: i32,
+    h: i32,
+    msaa_fbo: Option<glow::Framebuffer>,
+    msaa_rbs: Vec<glow::Renderbuffer>,
+    resolve_fbo: glow::Framebuffer,
+    resolve_tex: glow::Texture,
+    resolve_depth: Option<glow::Renderbuffer>,
+}
+
+struct Gpu {
+    terrain: glow::Program,
+    u_view_proj: Option<glow::UniformLocation>,
+    u_sun: Option<glow::UniformLocation>,
+    u_eye: Option<glow::UniformLocation>,
+    u_map: Option<glow::UniformLocation>,
+    u_playable: Option<glow::UniformLocation>,
+    u_toggles: Option<glow::UniformLocation>,
+    u_path: Option<glow::UniformLocation>,
+    u_bounds_color: Option<glow::UniformLocation>,
+    u_unwalk: Option<glow::UniformLocation>,
+    u_unbuild: Option<glow::UniformLocation>,
+    u_nofly: Option<glow::UniformLocation>,
+    u_fog: Option<glow::UniformLocation>,
+    water: glow::Program,
+    w_view_proj: Option<glow::UniformLocation>,
+    w_rect: Option<glow::UniformLocation>,
+    w_color: Option<glow::UniformLocation>,
+    w_eye: Option<glow::UniformLocation>,
+    blit: glow::Program,
+    b_tex: Option<glow::UniformLocation>,
+    vao: glow::VertexArray,
+    empty_vao: glow::VertexArray,
+    vbo: glow::Buffer,
+    ibo: glow::Buffer,
+    index_count: i32,
+    vbo_bytes: usize,
+    path_tex: glow::Texture,
+    path_size: (u32, u32),
+    targets: Option<Targets>,
+    max_samples: i32,
+}
+
+const TERRAIN_VS: &str = r#"
+in vec3 a_pos;
+in vec3 a_normal;
+in vec4 a_color;
+uniform mat4 u_view_proj;
+out vec3 v_world;
+out vec3 v_normal;
+out vec3 v_color;
+out float v_cliff;
+void main() {
+    v_world = a_pos;
+    v_normal = a_normal;
+    v_color = a_color.rgb;
+    v_cliff = a_color.a * 255.0 / 16.0;
+    gl_Position = u_view_proj * vec4(a_pos, 1.0);
+}
+"#;
+
+const TERRAIN_FS: &str = r#"
+in vec3 v_world;
+in vec3 v_normal;
+in vec3 v_color;
+in float v_cliff;
+uniform vec3 u_sun;
+uniform vec3 u_eye;
+uniform vec2 u_map;
+uniform vec4 u_playable;
+// x: grid, y: contours, z: cliff tint, w: pathing overlay
+uniform vec4 u_toggles;
+uniform sampler2D u_path;
+uniform vec4 u_bounds_color;
+uniform vec4 u_unwalk;
+uniform vec4 u_unbuild;
+uniform vec4 u_nofly;
+// rgb: fog color, a: fog start distance
+uniform vec4 u_fog;
+out vec4 o_color;
+
+float hash12(vec2 p) {
+    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+float vnoise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    float a = hash12(i);
+    float b = hash12(i + vec2(1.0, 0.0));
+    float c = hash12(i + vec2(0.0, 1.0));
+    float d = hash12(i + vec2(1.0, 1.0));
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+// Anti-aliased line at integer values of `coord`, `px` pixels wide.
+float grid_line(float coord, float px) {
+    float w = max(fwidth(coord), 1e-5);
+    float d = abs(fract(coord - 0.5) - 0.5) / w;
+    return 1.0 - clamp(d - px * 0.5 + 0.5, 0.0, 1.0);
+}
+
+vec3 hsv(float h, float s, float v) {
+    vec3 k = clamp(abs(fract(h + vec3(0.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0) - 1.0, 0.0, 1.0);
+    return v * mix(vec3(1.0), k, s);
+}
+
+vec3 cliff_color(float level) {
+    // Neighbouring levels get well-separated hues (golden-ratio steps) so
+    // terraces read at a glance; higher levels are a little brighter.
+    return hsv(fract(0.58 + level * 0.381966), 0.55, 0.55 + 0.03 * level);
+}
+
+void main() {
+    vec3 n = normalize(v_normal);
+    vec3 base = v_color;
+
+    // Procedural grain so flat textures do not read as plastic.
+    float g = vnoise(v_world.xy * 1.3) * 0.6 + vnoise(v_world.xy * 5.1) * 0.4;
+    base *= 0.9 + 0.2 * g;
+
+    if (u_toggles.z > 0.5) {
+        base = mix(base, cliff_color(floor(v_cliff + 0.5)), 0.6);
+    }
+
+    // Steep faces turn darker and greyer, like exposed rock.
+    float slope = 1.0 - n.z;
+    float rock = smoothstep(0.22, 0.7, slope);
+    float lum = dot(base, vec3(0.299, 0.587, 0.114));
+    base = mix(base, vec3(lum) * vec3(0.78, 0.76, 0.74), rock * 0.7);
+
+    // Hemisphere ambient + sun.
+    float hemi = n.z * 0.5 + 0.5;
+    vec3 ambient = mix(vec3(0.30, 0.28, 0.27), vec3(0.56, 0.61, 0.70), hemi);
+    float diff = max(dot(n, u_sun), 0.0);
+    vec3 lit = base * (ambient + vec3(1.0, 0.95, 0.86) * diff * 0.78);
+
+    if (u_toggles.y > 0.5) {
+        float minor = grid_line(v_world.z, 1.0);
+        float major = grid_line(v_world.z * 0.5, 1.5);
+        lit = mix(lit, lit * 0.5, minor * 0.35);
+        lit = mix(lit, lit * 0.35, major * 0.55);
+    }
+
+    if (u_toggles.x > 0.5) {
+        float gl = max(grid_line(v_world.x, 1.0), grid_line(v_world.y, 1.0));
+        float density = max(fwidth(v_world.x), fwidth(v_world.y));
+        float fade = clamp(1.6 - density * 6.0, 0.0, 1.0);
+        lit = mix(lit, vec3(1.0), gl * 0.22 * fade);
+    }
+
+    if (u_toggles.w > 0.5) {
+        vec2 cell = clamp(floor(v_world.xy), vec2(0.0), u_map - 1.0);
+        int f = int(texelFetch(u_path, ivec2(cell), 0).r * 255.0 + 0.5);
+        if ((f & 1) != 0) {
+            lit = mix(lit, u_unwalk.rgb, 0.55);
+        } else if ((f & 2) != 0) {
+            lit = mix(lit, u_unbuild.rgb, 0.45);
+        }
+        if ((f & 4) != 0) {
+            float stripe = step(0.5, fract((v_world.x + v_world.y) * 1.5));
+            lit = mix(lit, u_nofly.rgb, 0.35 * stripe);
+        }
+    }
+
+    // Darken outside the playable area and outline its edge.
+    vec2 p = v_world.xy;
+    vec2 c = (u_playable.xy + u_playable.zw) * 0.5;
+    vec2 h = (u_playable.zw - u_playable.xy) * 0.5;
+    vec2 q = abs(p - c) - h;
+    float sd = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0);
+    if (sd > 0.0) {
+        lit *= 0.42;
+    }
+    float edge = 1.0 - clamp(abs(sd) / max(fwidth(sd), 1e-5) - 0.75, 0.0, 1.0);
+    lit = mix(lit, u_bounds_color.rgb, edge * 0.85);
+
+    // Gentle distance haze toward the background.
+    float dist = length(u_eye - v_world);
+    float fog = clamp((dist - u_fog.a) / (u_fog.a * 2.0 + 1.0), 0.0, 0.45);
+    lit = mix(lit, u_fog.rgb, fog);
+
+    o_color = vec4(lit, 1.0);
+}
+"#;
+
+const WATER_VS: &str = r#"
+uniform mat4 u_view_proj;
+// x0, y0, x1, y1 with z in a separate slot
+uniform vec4 u_rect;
+uniform vec4 u_color;
+out vec3 v_world;
+void main() {
+    int id = gl_VertexID;
+    vec2 corner = vec2((id == 1 || id == 2 || id == 4) ? 1.0 : 0.0, (id == 2 || id == 4 || id == 5) ? 1.0 : 0.0);
+    vec2 xy = mix(u_rect.xy, u_rect.zw, corner);
+    v_world = vec3(xy, u_color.a);
+    gl_Position = u_view_proj * vec4(v_world, 1.0);
+}
+"#;
+
+const WATER_FS: &str = r#"
+in vec3 v_world;
+uniform vec4 u_color;
+uniform vec3 u_eye;
+out vec4 o_color;
+void main() {
+    vec3 v = normalize(u_eye - v_world);
+    float fresnel = pow(1.0 - clamp(v.z, 0.0, 1.0), 3.0);
+    vec3 col = mix(u_color.rgb, vec3(0.75, 0.85, 0.95), fresnel * 0.6);
+    o_color = vec4(col, 0.55 + fresnel * 0.3);
+}
+"#;
+
+const BLIT_VS: &str = r#"
+out vec2 v_uv;
+void main() {
+    vec2 p = vec2(gl_VertexID == 1 ? 3.0 : -1.0, gl_VertexID == 2 ? 3.0 : -1.0);
+    v_uv = p * 0.5 + 0.5;
+    gl_Position = vec4(p, 0.0, 1.0);
+}
+"#;
+
+const BLIT_FS: &str = r#"
+in vec2 v_uv;
+uniform sampler2D u_tex;
+out vec4 o_color;
+void main() {
+    o_color = vec4(texture(u_tex, v_uv).rgb, 1.0);
+}
+"#;
+
+fn header(gl: &glow::Context) -> Result<&'static str, String> {
+    match egui_glow::ShaderVersion::get(gl) {
+        egui_glow::ShaderVersion::Es300 => {
+            Ok("#version 300 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;\n")
+        }
+        egui_glow::ShaderVersion::Gl140 => Ok("#version 140\n"),
+        v => Err(format!("The 3D view needs WebGL 2 or OpenGL 3.1 (found {v:?}).")),
+    }
+}
+
+unsafe fn compile(
+    gl: &glow::Context,
+    hdr: &str,
+    vs: &str,
+    fs: &str,
+    attribs: &[&str],
+) -> Result<glow::Program, String> {
+    unsafe {
+        let program = gl.create_program()?;
+        let mut shaders = Vec::new();
+        for (kind, src) in [(glow::VERTEX_SHADER, vs), (glow::FRAGMENT_SHADER, fs)] {
+            let s = gl.create_shader(kind)?;
+            gl.shader_source(s, &format!("{hdr}{src}"));
+            gl.compile_shader(s);
+            if !gl.get_shader_compile_status(s) {
+                return Err(format!("shader compile failed: {}", gl.get_shader_info_log(s)));
+            }
+            gl.attach_shader(program, s);
+            shaders.push(s);
+        }
+        for (i, a) in attribs.iter().enumerate() {
+            gl.bind_attrib_location(program, i as u32, a);
+        }
+        gl.link_program(program);
+        if !gl.get_program_link_status(program) {
+            return Err(format!("shader link failed: {}", gl.get_program_info_log(program)));
+        }
+        for s in shaders {
+            gl.detach_shader(program, s);
+            gl.delete_shader(s);
+        }
+        Ok(program)
+    }
+}
+
+impl Gpu {
+    unsafe fn new(gl: &glow::Context) -> Result<Self, String> {
+        unsafe {
+            let hdr = header(gl)?;
+            let terrain = compile(gl, hdr, TERRAIN_VS, TERRAIN_FS, &["a_pos", "a_normal", "a_color"])?;
+            let water = compile(gl, hdr, WATER_VS, WATER_FS, &[])?;
+            let blit = compile(gl, hdr, BLIT_VS, BLIT_FS, &[])?;
+            let u = |p: glow::Program, n: &str| gl.get_uniform_location(p, n);
+
+            let vao = gl.create_vertex_array()?;
+            let empty_vao = gl.create_vertex_array()?;
+            let vbo = gl.create_buffer()?;
+            let ibo = gl.create_buffer()?;
+            gl.bind_vertex_array(Some(vao));
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
+            gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(ibo));
+            let stride = std::mem::size_of::<super::mesh::Vertex>() as i32;
+            gl.enable_vertex_attrib_array(0);
+            gl.vertex_attrib_pointer_f32(0, 3, glow::FLOAT, false, stride, 0);
+            gl.enable_vertex_attrib_array(1);
+            gl.vertex_attrib_pointer_f32(1, 3, glow::FLOAT, false, stride, 12);
+            gl.enable_vertex_attrib_array(2);
+            gl.vertex_attrib_pointer_f32(2, 4, glow::UNSIGNED_BYTE, true, stride, 24);
+            gl.bind_vertex_array(None);
+            gl.bind_buffer(glow::ARRAY_BUFFER, None);
+
+            let path_tex = gl.create_texture()?;
+            gl.bind_texture(glow::TEXTURE_2D, Some(path_tex));
+            for (p, v) in [
+                (glow::TEXTURE_MIN_FILTER, glow::NEAREST),
+                (glow::TEXTURE_MAG_FILTER, glow::NEAREST),
+                (glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE),
+                (glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE),
+            ] {
+                gl.tex_parameter_i32(glow::TEXTURE_2D, p, v as i32);
+            }
+            gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::R8 as i32,
+                1,
+                1,
+                0,
+                glow::RED,
+                glow::UNSIGNED_BYTE,
+                glow::PixelUnpackData::Slice(Some(&[0u8])),
+            );
+            gl.bind_texture(glow::TEXTURE_2D, None);
+
+            let max_samples = gl.get_parameter_i32(glow::MAX_SAMPLES).clamp(0, 4);
+
+            Ok(Self {
+                u_view_proj: u(terrain, "u_view_proj"),
+                u_sun: u(terrain, "u_sun"),
+                u_eye: u(terrain, "u_eye"),
+                u_map: u(terrain, "u_map"),
+                u_playable: u(terrain, "u_playable"),
+                u_toggles: u(terrain, "u_toggles"),
+                u_path: u(terrain, "u_path"),
+                u_bounds_color: u(terrain, "u_bounds_color"),
+                u_unwalk: u(terrain, "u_unwalk"),
+                u_unbuild: u(terrain, "u_unbuild"),
+                u_nofly: u(terrain, "u_nofly"),
+                u_fog: u(terrain, "u_fog"),
+                terrain,
+                w_view_proj: u(water, "u_view_proj"),
+                w_rect: u(water, "u_rect"),
+                w_color: u(water, "u_color"),
+                w_eye: u(water, "u_eye"),
+                water,
+                b_tex: u(blit, "u_tex"),
+                blit,
+                vao,
+                empty_vao,
+                vbo,
+                ibo,
+                index_count: 0,
+                vbo_bytes: 0,
+                path_tex,
+                path_size: (1, 1),
+                targets: None,
+                max_samples,
+            })
+        }
+    }
+
+    unsafe fn upload(&mut self, gl: &glow::Context, up: &mut Uploads) {
+        unsafe {
+            if let Some(full) = up.full.take() {
+                gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.vbo));
+                gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, &full.vertices, glow::DYNAMIC_DRAW);
+                gl.bind_buffer(glow::ARRAY_BUFFER, None);
+                self.vbo_bytes = full.vertices.len();
+                gl.bind_vertex_array(Some(self.vao));
+                gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(self.ibo));
+                gl.buffer_data_u8_slice(
+                    glow::ELEMENT_ARRAY_BUFFER,
+                    bytemuck::cast_slice(&full.indices),
+                    glow::STATIC_DRAW,
+                );
+                gl.bind_vertex_array(None);
+                self.index_count = full.indices.len() as i32;
+                up.rows.clear();
+            }
+            if !up.rows.is_empty() {
+                gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.vbo));
+                for (off, bytes) in up.rows.drain(..) {
+                    if off + bytes.len() <= self.vbo_bytes {
+                        gl.buffer_sub_data_u8_slice(glow::ARRAY_BUFFER, off as i32, &bytes);
+                    }
+                }
+                gl.bind_buffer(glow::ARRAY_BUFFER, None);
+            }
+            if let Some((w, h, data)) = up.pathing.take() {
+                gl.bind_texture(glow::TEXTURE_2D, Some(self.path_tex));
+                gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+                if self.path_size == (w, h) {
+                    gl.tex_sub_image_2d(
+                        glow::TEXTURE_2D,
+                        0,
+                        0,
+                        0,
+                        w as i32,
+                        h as i32,
+                        glow::RED,
+                        glow::UNSIGNED_BYTE,
+                        glow::PixelUnpackData::Slice(Some(&data)),
+                    );
+                } else {
+                    gl.tex_image_2d(
+                        glow::TEXTURE_2D,
+                        0,
+                        glow::R8 as i32,
+                        w as i32,
+                        h as i32,
+                        0,
+                        glow::RED,
+                        glow::UNSIGNED_BYTE,
+                        glow::PixelUnpackData::Slice(Some(&data)),
+                    );
+                    self.path_size = (w, h);
+                }
+                gl.bind_texture(glow::TEXTURE_2D, None);
+            }
+        }
+    }
+
+    unsafe fn ensure_targets(&mut self, gl: &glow::Context, w: i32, h: i32) -> Result<(), String> {
+        unsafe {
+            if self.targets.as_ref().is_some_and(|t| t.w == w && t.h == h) {
+                return Ok(());
+            }
+            if let Some(t) = self.targets.take() {
+                if let Some(f) = t.msaa_fbo {
+                    gl.delete_framebuffer(f);
+                }
+                for rb in t.msaa_rbs {
+                    gl.delete_renderbuffer(rb);
+                }
+                if let Some(rb) = t.resolve_depth {
+                    gl.delete_renderbuffer(rb);
+                }
+                gl.delete_framebuffer(t.resolve_fbo);
+                gl.delete_texture(t.resolve_tex);
+            }
+            let resolve_tex = gl.create_texture()?;
+            gl.bind_texture(glow::TEXTURE_2D, Some(resolve_tex));
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::RGBA8 as i32,
+                w,
+                h,
+                0,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelUnpackData::Slice(None),
+            );
+            for (p, v) in [
+                (glow::TEXTURE_MIN_FILTER, glow::NEAREST),
+                (glow::TEXTURE_MAG_FILTER, glow::NEAREST),
+                (glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE),
+                (glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE),
+            ] {
+                gl.tex_parameter_i32(glow::TEXTURE_2D, p, v as i32);
+            }
+            gl.bind_texture(glow::TEXTURE_2D, None);
+            let resolve_fbo = gl.create_framebuffer()?;
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(resolve_fbo));
+            gl.framebuffer_texture_2d(
+                glow::FRAMEBUFFER,
+                glow::COLOR_ATTACHMENT0,
+                glow::TEXTURE_2D,
+                Some(resolve_tex),
+                0,
+            );
+
+            let mut targets =
+                Targets { w, h, msaa_fbo: None, msaa_rbs: Vec::new(), resolve_fbo, resolve_tex, resolve_depth: None };
+            let mut msaa_ok = false;
+            if self.max_samples > 1 {
+                let fbo = gl.create_framebuffer()?;
+                let color = gl.create_renderbuffer()?;
+                let depth = gl.create_renderbuffer()?;
+                gl.bind_renderbuffer(glow::RENDERBUFFER, Some(color));
+                gl.renderbuffer_storage_multisample(glow::RENDERBUFFER, self.max_samples, glow::RGBA8, w, h);
+                gl.bind_renderbuffer(glow::RENDERBUFFER, Some(depth));
+                gl.renderbuffer_storage_multisample(
+                    glow::RENDERBUFFER,
+                    self.max_samples,
+                    glow::DEPTH_COMPONENT24,
+                    w,
+                    h,
+                );
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+                gl.framebuffer_renderbuffer(
+                    glow::FRAMEBUFFER,
+                    glow::COLOR_ATTACHMENT0,
+                    glow::RENDERBUFFER,
+                    Some(color),
+                );
+                gl.framebuffer_renderbuffer(glow::FRAMEBUFFER, glow::DEPTH_ATTACHMENT, glow::RENDERBUFFER, Some(depth));
+                msaa_ok = gl.check_framebuffer_status(glow::FRAMEBUFFER) == glow::FRAMEBUFFER_COMPLETE;
+                targets.msaa_fbo = Some(fbo);
+                targets.msaa_rbs = vec![color, depth];
+                if !msaa_ok {
+                    log::warn!("MSAA framebuffer incomplete; rendering without anti-aliasing");
+                    gl.delete_framebuffer(fbo);
+                    gl.delete_renderbuffer(color);
+                    gl.delete_renderbuffer(depth);
+                    targets.msaa_fbo = None;
+                    targets.msaa_rbs.clear();
+                    self.max_samples = 0;
+                }
+            }
+            if !msaa_ok {
+                let depth = gl.create_renderbuffer()?;
+                gl.bind_renderbuffer(glow::RENDERBUFFER, Some(depth));
+                gl.renderbuffer_storage(glow::RENDERBUFFER, glow::DEPTH_COMPONENT24, w, h);
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(resolve_fbo));
+                gl.framebuffer_renderbuffer(glow::FRAMEBUFFER, glow::DEPTH_ATTACHMENT, glow::RENDERBUFFER, Some(depth));
+                targets.resolve_depth = Some(depth);
+            }
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(resolve_fbo));
+            let status = gl.check_framebuffer_status(glow::FRAMEBUFFER);
+            gl.bind_renderbuffer(glow::RENDERBUFFER, None);
+            self.targets = Some(targets);
+            if status != glow::FRAMEBUFFER_COMPLETE {
+                return Err(format!("offscreen framebuffer incomplete (0x{status:x})"));
+            }
+            Ok(())
+        }
+    }
+
+    unsafe fn paint(
+        &mut self,
+        gl: &glow::Context,
+        info: &egui::PaintCallbackInfo,
+        p: &FrameParams,
+        out_fbo: Option<glow::Framebuffer>,
+    ) {
+        unsafe {
+            let vp = info.viewport_in_pixels();
+            let (w, h) = (vp.width_px.max(1), vp.height_px.max(1));
+            if let Err(e) = self.ensure_targets(gl, w, h) {
+                log::error!("{e}");
+                gl.bind_framebuffer(glow::FRAMEBUFFER, out_fbo);
+                return;
+            }
+            let t = self.targets.as_ref().expect("targets");
+            let draw_fbo = t.msaa_fbo.unwrap_or(t.resolve_fbo);
+
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(draw_fbo));
+            gl.viewport(0, 0, w, h);
+            gl.disable(glow::SCISSOR_TEST);
+            gl.disable(glow::BLEND);
+            gl.enable(glow::DEPTH_TEST);
+            gl.depth_func(glow::LEQUAL);
+            gl.depth_mask(true);
+            gl.enable(glow::CULL_FACE);
+            gl.cull_face(glow::BACK);
+            gl.front_face(glow::CCW);
+            gl.color_mask(true, true, true, true);
+            gl.clear_color(p.clear[0], p.clear[1], p.clear[2], 1.0);
+            gl.clear_depth_f32(1.0);
+            gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
+
+            let vp_cols = p.view_proj.to_cols_array();
+            if self.index_count > 0 {
+                gl.use_program(Some(self.terrain));
+                gl.uniform_matrix_4_f32_slice(self.u_view_proj.as_ref(), false, &vp_cols);
+                let sun = Vec3::new(-0.45, -0.35, 0.82).normalize();
+                gl.uniform_3_f32(self.u_sun.as_ref(), sun.x, sun.y, sun.z);
+                gl.uniform_3_f32(self.u_eye.as_ref(), p.eye.x, p.eye.y, p.eye.z);
+                gl.uniform_2_f32(self.u_map.as_ref(), p.map_size[0], p.map_size[1]);
+                let [a, b, c, d] = p.playable;
+                gl.uniform_4_f32(self.u_playable.as_ref(), a, b, c, d);
+                let f = |b: bool| if b { 1.0 } else { 0.0 };
+                gl.uniform_4_f32(
+                    self.u_toggles.as_ref(),
+                    f(p.show_grid),
+                    f(p.show_contours),
+                    f(p.cliff_tint),
+                    f(p.show_pathing),
+                );
+                let v4 = |l: Option<&glow::UniformLocation>, c: [f32; 4]| gl.uniform_4_f32(l, c[0], c[1], c[2], c[3]);
+                v4(self.u_bounds_color.as_ref(), p.bounds_color);
+                v4(self.u_unwalk.as_ref(), p.unwalkable);
+                v4(self.u_unbuild.as_ref(), p.unbuildable);
+                v4(self.u_nofly.as_ref(), p.nofly);
+                let fog_start = p.map_size[0].max(p.map_size[1]) * 1.2;
+                gl.uniform_4_f32(self.u_fog.as_ref(), p.clear[0], p.clear[1], p.clear[2], fog_start);
+                gl.active_texture(glow::TEXTURE0);
+                gl.bind_texture(glow::TEXTURE_2D, Some(self.path_tex));
+                gl.uniform_1_i32(self.u_path.as_ref(), 0);
+                gl.bind_vertex_array(Some(self.vao));
+                gl.draw_elements(glow::TRIANGLES, self.index_count, glow::UNSIGNED_INT, 0);
+                gl.bind_vertex_array(None);
+            }
+
+            if let Some(z) = p.water {
+                gl.disable(glow::CULL_FACE);
+                gl.enable(glow::BLEND);
+                gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
+                gl.depth_mask(false);
+                gl.use_program(Some(self.water));
+                gl.uniform_matrix_4_f32_slice(self.w_view_proj.as_ref(), false, &vp_cols);
+                gl.uniform_4_f32(self.w_rect.as_ref(), 0.0, 0.0, p.map_size[0], p.map_size[1]);
+                let c = p.water_color;
+                gl.uniform_4_f32(self.w_color.as_ref(), c[0], c[1], c[2], z);
+                gl.uniform_3_f32(self.w_eye.as_ref(), p.eye.x, p.eye.y, p.eye.z);
+                gl.bind_vertex_array(Some(self.empty_vao));
+                gl.draw_arrays(glow::TRIANGLES, 0, 6);
+                gl.bind_vertex_array(None);
+                gl.depth_mask(true);
+                gl.disable(glow::BLEND);
+            }
+
+            if let Some(msaa) = t.msaa_fbo {
+                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(msaa));
+                gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(t.resolve_fbo));
+                gl.blit_framebuffer(0, 0, w, h, 0, 0, w, h, glow::COLOR_BUFFER_BIT, glow::NEAREST);
+            }
+
+            // Composite into egui's framebuffer, clipped to the panel.
+            gl.bind_framebuffer(glow::FRAMEBUFFER, out_fbo);
+            gl.viewport(vp.left_px, vp.from_bottom_px, vp.width_px, vp.height_px);
+            let clip = info.clip_rect_in_pixels();
+            gl.enable(glow::SCISSOR_TEST);
+            gl.scissor(clip.left_px, clip.from_bottom_px, clip.width_px, clip.height_px);
+            gl.disable(glow::DEPTH_TEST);
+            gl.disable(glow::CULL_FACE);
+            gl.disable(glow::BLEND);
+            gl.use_program(Some(self.blit));
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, Some(t.resolve_tex));
+            gl.uniform_1_i32(self.b_tex.as_ref(), 0);
+            gl.bind_vertex_array(Some(self.empty_vao));
+            gl.draw_arrays(glow::TRIANGLES, 0, 3);
+            gl.bind_vertex_array(None);
+            gl.bind_texture(glow::TEXTURE_2D, None);
+            gl.use_program(None);
+        }
+    }
+}
