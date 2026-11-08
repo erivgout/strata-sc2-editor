@@ -135,6 +135,7 @@ fn main() {
     let bridge = match &cli.ws {
         None => {
             live.unavailable = Some("disabled with --no-live".into());
+            live.token_file = None;
             None
         }
         Some(addr) => {

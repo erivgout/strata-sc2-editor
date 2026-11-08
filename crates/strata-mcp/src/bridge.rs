@@ -5,6 +5,10 @@
 //! queued requests and a short-timeout read, so one socket serves both
 //! directions without splitting it.
 
+// tungstenite's error and handshake-response types are large, and
+// `Bridge::request` hands the (large) request back when no editor is connected.
+#![allow(clippy::result_large_err)]
+
 use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::net::{SocketAddr, TcpListener, TcpStream};

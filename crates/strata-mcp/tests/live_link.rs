@@ -2,6 +2,8 @@
 //! fake editor over a real WebSocket, and check MCP tool calls are routed to
 //! it (and fall back to the headless map when it leaves).
 
+#![allow(clippy::result_large_err)]
+
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};

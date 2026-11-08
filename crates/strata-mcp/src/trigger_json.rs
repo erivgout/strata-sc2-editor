@@ -151,9 +151,11 @@ pub fn parse_expr(v: &Value) -> Result<Expr, String> {
             }
             let (k, val) = match o.iter().next() {
                 Some(kv) if o.len() == 1 => kv,
-                _ => return Err(format!(
+                _ => {
+                    return Err(format!(
                     "cannot read expression {v}; see the create_trigger description for the forms"
-                )),
+                ))
+                }
             };
             let s = || {
                 val.as_str()
