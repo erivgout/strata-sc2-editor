@@ -187,7 +187,8 @@ fn quad(opt: &Fixture) -> Vec<u8> {
 
 #[test]
 fn modl_sizes_match_known_versions() {
-    for (v, size) in [(20, 748), (21, 760), (23, 784), (24, 796), (25, 808), (26, 820), (28, 844), (29, 856), (30, 868)] {
+    for (v, size) in [(20, 748), (21, 760), (23, 784), (24, 796), (25, 808), (26, 820), (28, 844), (29, 856), (30, 868)]
+    {
         assert_eq!(Modl::layout(0, v).size, size, "MODL v{v}");
     }
 }
@@ -195,7 +196,16 @@ fn modl_sizes_match_known_versions() {
 #[test]
 fn vertex_layouts_match_known_formats() {
     // Sizes of the vertex formats listed in m3addon's structures.xml.
-    for (flags, size) in [(0x182007d, 32), (0x182027d, 36), (0x186007d, 36), (0x18e007d, 40), (0x19e027d, 48), (0x1820061, 32), (0x1860261, 40), (0x4182007d, 36)] {
+    for (flags, size) in [
+        (0x182007d, 32),
+        (0x182027d, 36),
+        (0x186007d, 36),
+        (0x18e007d, 40),
+        (0x19e027d, 48),
+        (0x1820061, 32),
+        (0x1860261, 40),
+        (0x4182007d, 36),
+    ] {
         assert_eq!(VertexLayout::new(flags).stride, size, "format 0x{flags:x}");
     }
     let l = VertexLayout::new(0x182027d);

@@ -363,9 +363,8 @@ impl<'a> File<'a> {
         if count > e.count || count > MAX_ITEMS {
             return Err(corrupt(format!("{}: {count} items but the entry holds {}", tag_name(want), e.count)));
         }
-        let stride = stride(e.version).ok_or_else(|| {
-            M3Error::Unsupported(format!("{} version {}", tag_name(want), e.version))
-        })?;
+        let stride = stride(e.version)
+            .ok_or_else(|| M3Error::Unsupported(format!("{} version {}", tag_name(want), e.version)))?;
         let items = Items { offset: e.offset, count, stride, version: e.version };
         self.bytes(e.offset, count.checked_mul(stride).ok_or_else(|| corrupt("array size"))?)?;
         Ok(Some(items))
@@ -648,7 +647,8 @@ impl<'a> File<'a> {
                 if index >= blocks.count {
                     continue;
                 }
-                let Some(keys) = self.items(self.reference(blocks.at(index) + 20)?, key_tag, |_| Some(key_size))? else {
+                let Some(keys) = self.items(self.reference(blocks.at(index) + 20)?, key_tag, |_| Some(key_size))?
+                else {
                     continue;
                 };
                 tracks.entry(id).or_insert(track(keys.at(0)));

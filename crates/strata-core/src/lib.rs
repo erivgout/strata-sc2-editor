@@ -16,6 +16,7 @@
 //! - [`ops`]: serializable document operations (the MCP / command API).
 //! - [`history`]: undo/redo built on reversible [`history::Edit`]s.
 //! - [`known`]: curated SC2 unit, doodad and texture ids for pickers.
+//! - [`models`]: which `.m3` model draws a placed unit or doodad.
 //! - [`validate`]: problems shown in the Problems panel.
 
 pub mod base_data;
@@ -26,6 +27,7 @@ pub mod document;
 pub mod galaxy;
 pub mod history;
 pub mod known;
+pub mod models;
 pub mod objects;
 pub mod ops;
 pub mod regions;
