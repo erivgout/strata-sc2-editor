@@ -10,7 +10,6 @@ use super::select::Drag;
 use super::{next_numbered, ToolInput, ToolState};
 use crate::render::overlay;
 use crate::state::{EditorState, Mode};
-use crate::theme;
 
 /// Default color for new regions (sRGB). Matches `ops::CreateRegion`.
 const REGION_COLOR: [u8; 3] = [98, 205, 235];
@@ -120,9 +119,11 @@ impl ToolState {
         let Some(h) = input.hover else { return };
         let xy = self.snap(h.truncate());
         let p = Vec3::new(xy.x, xy.y, state.doc.terrain.sample_height(xy.x, xy.y));
-        let tk = theme::tokens(painter.ctx());
+        let tk = crate::render::overlay::MAP;
         let unit = state.mode == Mode::Units;
-        let color = if unit { overlay::player_color(&state.doc, state.place_player, &tk) } else { tk.text_dim };
+        // Neutral types are placed for the neutral player; preview that.
+        let player = if known::is_neutral_unit(&state.place_type) { 0 } else { state.place_player };
+        let color = overlay::player_color(&state.doc, player, &tk);
         let mut ghost = PlacedObject::new(
             strata_core::objects::ObjectId(0),
             if unit { ObjectKind::Unit } else { ObjectKind::Doodad },
@@ -130,11 +131,14 @@ impl ToolState {
             p,
         );
         ghost.rotation = self.settings.ghost_rotation;
-        overlay::draw_object(painter, &input.view, input.rect.min, &ghost, color.gamma_multiply(0.6), None, true, &tk);
+        let style = overlay::MarkerStyle { color, selected: false, hovered: false, ghost: true };
+        if let Some(label) = overlay::draw_object(painter, &input.view, input.rect.min, &ghost, style, &tk) {
+            overlay::draw_labels(painter, vec![label], input.rect, &tk);
+        }
     }
 
     pub(crate) fn paint_region_preview(&self, painter: &egui::Painter, state: &EditorState, input: &ToolInput) {
-        let tk = theme::tokens(painter.ctx());
+        let tk = crate::render::overlay::MAP;
         if let (Some(Drag::Region { start, circle }), Some(h)) = (self.drag.as_ref(), input.hover) {
             if let Some(shape) = region_shape(*start, self.snap(h.truncate()), *circle) {
                 overlay::draw_shape(painter, &input.view, input.rect.min, &state.doc.terrain, &shape, tk.accent, true);
@@ -146,11 +150,12 @@ impl ToolState {
 
     pub(crate) fn paint_crosshair(&self, painter: &egui::Painter, input: &ToolInput) {
         let Some(h) = input.hover else { return };
-        let tk = theme::tokens(painter.ctx());
+        let tk = crate::render::overlay::MAP;
         if let Some(p) = input.project(h) {
-            let s = egui::Stroke::new(1.0, tk.text);
-            painter.line_segment([p - egui::vec2(6.0, 0.0), p + egui::vec2(6.0, 0.0)], s);
-            painter.line_segment([p - egui::vec2(0.0, 6.0), p + egui::vec2(0.0, 6.0)], s);
+            for s in [egui::Stroke::new(3.0, tk.bg_deep.gamma_multiply(0.7)), egui::Stroke::new(1.0, tk.text)] {
+                painter.line_segment([p - egui::vec2(7.0, 0.0), p + egui::vec2(7.0, 0.0)], s);
+                painter.line_segment([p - egui::vec2(0.0, 7.0), p + egui::vec2(0.0, 7.0)], s);
+            }
         }
     }
 }

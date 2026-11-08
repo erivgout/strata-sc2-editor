@@ -148,30 +148,30 @@ fn tool_options(ui: &mut egui::Ui, state: &mut EditorState, edits: &mut Edits, t
         Mode::Sculpt => {
             sub_tool_picker(ui, state, false);
             hint(ui, tk, state.ui.viewport.tools.settings.sculpt.hint());
-            brush_controls(ui, state, false);
+            brush_controls(ui, state);
         }
         Mode::Paint => {
             texture_layers(ui, state, edits, tk);
             sub_tool_picker(ui, state, false);
             hint(ui, tk, "Hold Ctrl to erase while painting.");
-            brush_controls(ui, state, false);
+            brush_controls(ui, state);
         }
         Mode::Cliff => {
             sub_tool_picker(ui, state, false);
             cliff_level_grid(ui, state);
             hint(ui, tk, "Raise and lower step one level from where the stroke starts. Hold Ctrl to invert.");
-            brush_controls(ui, state, false);
+            brush_controls(ui, state);
         }
         Mode::Pathing => {
             sub_tool_picker(ui, state, false);
             ui.horizontal(|ui| {
-                swatch(ui, tk.error);
+                swatch(ui, crate::render::overlay::MAP.error);
                 ui.label("Unwalkable");
-                swatch(ui, tk.warn);
+                swatch(ui, crate::render::overlay::MAP.warn);
                 ui.label("Unbuildable");
             });
             hint(ui, tk, "Hold Ctrl to clear the chosen flags.");
-            brush_controls(ui, state, false);
+            brush_controls(ui, state);
         }
         Mode::Units => {
             player_picker(ui, state, tk);
@@ -222,34 +222,41 @@ fn swatch(ui: &mut egui::Ui, c: Color32) {
     ui.painter().rect_filled(r, 2.0, c);
 }
 
+/// A row of mutually related toggle buttons. `compact` draws them as one
+/// segmented control on a recessed track (the floating HUD); otherwise they
+/// wrap like ordinary buttons (the Inspector).
+fn segmented<R>(ui: &mut egui::Ui, compact: bool, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    if compact {
+        let tk = theme::tokens(ui.ctx());
+        egui::Frame::new()
+            .fill(tk.bg_deep)
+            .corner_radius(4)
+            .inner_margin(egui::Margin::same(2))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    add(ui)
+                })
+                .inner
+            })
+            .inner
+    } else {
+        ui.horizontal_wrapped(add).inner
+    }
+}
+
 /// Sub-tool row for brush modes (shared with the floating HUD).
 pub fn sub_tool_picker(ui: &mut egui::Ui, state: &mut EditorState, compact: bool) {
     let s = &mut state.ui.viewport.tools.settings;
-    let layout = |ui: &mut egui::Ui, f: &mut dyn FnMut(&mut egui::Ui)| {
-        if compact {
-            f(ui);
-        } else {
-            ui.horizontal_wrapped(|ui| f(ui));
-        }
-    };
     match state.mode {
-        Mode::Sculpt => layout(ui, &mut |ui| {
+        Mode::Sculpt => segmented(ui, compact, |ui| {
             for t in SculptTool::ALL {
                 if ui.add(egui::Button::selectable(s.sculpt == t, t.label())).on_hover_text(t.hint()).clicked() {
                     s.sculpt = t;
                 }
             }
         }),
-        Mode::Paint => layout(ui, &mut |ui| {
-            if compact {
-                let layers = &state.doc.terrain.layers;
-                let name = layers.get(s.paint_layer).map(|l| l.texture.as_str()).unwrap_or("No layers");
-                egui::ComboBox::from_id_salt("hud-layer").selected_text(name).show_ui(ui, |ui| {
-                    for (i, l) in layers.iter().enumerate() {
-                        ui.selectable_value(&mut s.paint_layer, i, &l.texture);
-                    }
-                });
-            }
+        Mode::Paint => segmented(ui, compact, |ui| {
             if ui.add(egui::Button::selectable(!s.paint_erase, "Paint")).clicked() {
                 s.paint_erase = false;
             }
@@ -261,46 +268,57 @@ pub fn sub_tool_picker(ui: &mut egui::Ui, state: &mut EditorState, compact: bool
                 s.paint_erase = true;
             }
         }),
-        Mode::Cliff => layout(ui, &mut |ui| {
-            for op in CliffOp::ALL {
-                if ui.add(egui::Button::selectable(s.cliff_op == op, op.label())).clicked() {
-                    s.cliff_op = op;
+        Mode::Cliff => {
+            segmented(ui, compact, |ui| {
+                for op in CliffOp::ALL {
+                    if ui.add(egui::Button::selectable(s.cliff_op == op, op.label())).clicked() {
+                        s.cliff_op = op;
+                    }
                 }
-            }
+            });
             if compact && s.cliff_op == CliffOp::Set {
-                ui.add(egui::DragValue::new(&mut s.cliff_level).range(0..=15).prefix("Level "));
+                ui.add(egui::DragValue::new(&mut s.cliff_level).range(0..=15).prefix("Level "))
+                    .on_hover_text("Cliff level to paint");
             }
-        }),
-        Mode::Pathing => layout(ui, &mut |ui| {
-            for (bit, label, tip) in [
-                (pathing::UNWALKABLE, "Unwalkable", "Ground units cannot path here"),
-                (pathing::UNBUILDABLE, "Unbuildable", "Structures cannot be placed here"),
-                (pathing::NO_FLY, "No fly", "Air units cannot fly here"),
-            ] {
-                let on = s.pathing_flags & bit != 0;
-                if ui.add(egui::Button::selectable(on, label)).on_hover_text(tip).clicked() {
-                    s.pathing_flags ^= bit;
+        }
+        Mode::Pathing => {
+            let flags = |ui: &mut egui::Ui| {
+                for (bit, label, tip) in [
+                    (pathing::UNWALKABLE, "Unwalkable", "Ground units cannot path here"),
+                    (pathing::UNBUILDABLE, "Unbuildable", "Structures cannot be placed here"),
+                    (pathing::NO_FLY, "No fly", "Air units cannot fly here"),
+                ] {
+                    let on = s.pathing_flags & bit != 0;
+                    if ui.add(egui::Button::selectable(on, label)).on_hover_text(tip).clicked() {
+                        s.pathing_flags ^= bit;
+                    }
                 }
+            };
+            if compact {
+                segmented(ui, true, flags);
+            } else {
+                ui.horizontal_wrapped(flags);
             }
-            ui.separator();
-            if ui.add(egui::Button::selectable(!s.pathing_clear, "Paint")).clicked() {
-                s.pathing_clear = false;
-            }
-            if ui
-                .add(egui::Button::selectable(s.pathing_clear, "Clear"))
-                .on_hover_text("Or hold Ctrl while painting")
-                .clicked()
-            {
-                s.pathing_clear = true;
-            }
-        }),
+            segmented(ui, compact, |ui| {
+                if ui.add(egui::Button::selectable(!s.pathing_clear, "Paint")).clicked() {
+                    s.pathing_clear = false;
+                }
+                if ui
+                    .add(egui::Button::selectable(s.pathing_clear, "Clear"))
+                    .on_hover_text("Or hold Ctrl while painting")
+                    .clicked()
+                {
+                    s.pathing_clear = true;
+                }
+            });
+        }
         _ => {}
     }
 }
 
-/// Size / strength / falloff / shape. Inline in the floating HUD, a labeled
-/// grid in the Inspector.
-pub fn brush_controls(ui: &mut egui::Ui, state: &mut EditorState, compact: bool) {
+/// Size / strength / falloff / shape as a labeled grid in the Inspector.
+/// (The floating HUD shows only size and strength; see `viewport::brush_hud`.)
+pub fn brush_controls(ui: &mut egui::Ui, state: &mut EditorState) {
     let uses_strength = matches!(state.mode, Mode::Sculpt | Mode::Paint);
     let b = &mut state.brush;
     let size = |ui: &mut egui::Ui, b: &mut strata_core::brush::Brush| {
@@ -311,7 +329,7 @@ pub fn brush_controls(ui: &mut egui::Ui, state: &mut EditorState, compact: bool)
         ui.add(egui::Slider::new(&mut b.strength, 0.01..=1.0).max_decimals(2)).on_hover_text("Shift+[ and Shift+]");
     };
     let falloff = |ui: &mut egui::Ui, b: &mut strata_core::brush::Brush| {
-        egui::ComboBox::from_id_salt(("falloff", compact))
+        egui::ComboBox::from_id_salt("falloff")
             .selected_text(falloff_label(b.falloff))
             .width(90.0)
             .show_ui(ui, |ui| {
@@ -331,18 +349,6 @@ pub fn brush_controls(ui: &mut egui::Ui, state: &mut EditorState, compact: bool)
             b.shape = BrushShape::Square;
         }
     };
-    if compact {
-        ui.spacing_mut().slider_width = 90.0;
-        ui.label("Size");
-        size(ui, b);
-        if uses_strength {
-            ui.label("Strength");
-            strength(ui, b);
-            falloff(ui, b);
-        }
-        shape(ui, b);
-        return;
-    }
     ui.spacing_mut().slider_width = (ui.available_width() - 150.0).clamp(80.0, 200.0);
     egui::Grid::new("brush-grid").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
         ui.label("Size");
@@ -520,13 +526,13 @@ fn player_picker(ui: &mut egui::Ui, state: &mut EditorState, tk: &Tokens) {
 fn unit_picker(ui: &mut egui::Ui, state: &mut EditorState, tk: &Tokens) {
     ui.horizontal(|ui| {
         ui.label("Unit type");
-        ui.add(egui::TextEdit::singleline(&mut state.place_type).desired_width(140.0).hint_text("Any unit id"));
+        ui.add(egui::TextEdit::singleline(&mut state.place_type).desired_width(f32::INFINITY).hint_text("Any unit id"));
     });
     let search = &mut state.ui.inspector.unit_search;
     ui.add(egui::TextEdit::singleline(search).hint_text("Search units").desired_width(f32::INFINITY));
     let q = search.to_lowercase();
     let mut pick = None;
-    egui::ScrollArea::vertical().id_salt("unit-list").max_height(260.0).show(ui, |ui| {
+    egui::ScrollArea::vertical().auto_shrink([false, true]).id_salt("unit-list").max_height(260.0).show(ui, |ui| {
         for g in UnitGroup::ALL {
             let items: Vec<_> = g
                 .units()
@@ -562,12 +568,14 @@ fn unit_picker(ui: &mut egui::Ui, state: &mut EditorState, tk: &Tokens) {
 fn doodad_picker(ui: &mut egui::Ui, state: &mut EditorState, _tk: &Tokens) {
     ui.horizontal(|ui| {
         ui.label("Doodad");
-        ui.add(egui::TextEdit::singleline(&mut state.place_type).desired_width(140.0).hint_text("Any doodad id"));
+        ui.add(
+            egui::TextEdit::singleline(&mut state.place_type).desired_width(f32::INFINITY).hint_text("Any doodad id"),
+        );
     });
     let search = &mut state.ui.inspector.doodad_search;
     ui.add(egui::TextEdit::singleline(search).hint_text("Search doodads").desired_width(f32::INFINITY));
     let q = search.to_lowercase();
-    egui::ScrollArea::vertical().id_salt("doodad-list").max_height(220.0).show(ui, |ui| {
+    egui::ScrollArea::vertical().auto_shrink([false, true]).id_salt("doodad-list").max_height(220.0).show(ui, |ui| {
         for d in known::DOODADS {
             if !q.is_empty() && !d.name.to_lowercase().contains(&q) && !d.id.to_lowercase().contains(&q) {
                 continue;
@@ -601,20 +609,23 @@ fn item_list(ui: &mut egui::Ui, state: &mut EditorState, regions: bool) {
         return;
     }
     ui.label(RichText::new(if regions { "Regions" } else { "Cameras" }).strong());
-    egui::ScrollArea::vertical().id_salt(("items", regions)).max_height(160.0).show(ui, |ui| {
-        for (id, name) in items {
-            let on = if regions { state.selection.region == Some(id) } else { state.selection.camera == Some(id) };
-            if ui.selectable_label(on, name).clicked() {
-                state.selection.objects.clear();
-                if regions {
-                    state.selection.region = Some(id);
-                } else {
-                    state.selection.camera = Some(id);
+    egui::ScrollArea::vertical().auto_shrink([false, true]).id_salt(("items", regions)).max_height(160.0).show(
+        ui,
+        |ui| {
+            for (id, name) in items {
+                let on = if regions { state.selection.region == Some(id) } else { state.selection.camera == Some(id) };
+                if ui.selectable_label(on, name).clicked() {
+                    state.selection.objects.clear();
+                    if regions {
+                        state.selection.region = Some(id);
+                    } else {
+                        state.selection.camera = Some(id);
+                    }
+                    crate::panels::viewport::frame_selection(state);
                 }
-                crate::panels::viewport::frame_selection(state);
             }
-        }
-    });
+        },
+    );
 }
 
 // ---------------------------------------------------------------- selection
@@ -687,7 +698,10 @@ fn object_properties(ui: &mut egui::Ui, state: &mut EditorState, edits: &mut Edi
         }
         ui.end_row();
         if !ty_mixed {
-            if let Some(name) = known::unit_name(&ty).or(known::doodad_name(&ty)) {
+            let point_name = || known::POINT_TYPES.iter().find(|k| k.id == ty).map(|k| k.name);
+            if let Some(name) =
+                known::unit_name(&ty).or(known::doodad_name(&ty)).or_else(point_name).filter(|n| *n != ty)
+            {
                 ui.label("");
                 ui.label(RichText::new(name).color(tk.text_dim).size(12.0));
                 ui.end_row();

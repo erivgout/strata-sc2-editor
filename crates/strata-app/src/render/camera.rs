@@ -11,6 +11,9 @@ pub const MAX_PITCH: f32 = 1.5533; // ~89 degrees
 pub const MIN_DISTANCE: f32 = 4.0;
 pub const MAX_DISTANCE: f32 = 900.0;
 pub const DEFAULT_PITCH: f32 = 0.977; // 56 degrees, the SC2 game camera
+/// Pitch used when framing the whole map: a little lower than the game
+/// camera so sculpted relief reads at a glance.
+pub const MAP_PITCH: f32 = 0.855; // 49 degrees
 pub const DEFAULT_YAW: f32 = std::f32::consts::FRAC_PI_2;
 pub const FOV_Y: f32 = 0.82; // ~47 degrees
 
@@ -160,6 +163,68 @@ impl OrbitCamera {
         self.goal.distance = (radius.max(4.0) / half.tan() * 1.15).clamp(MIN_DISTANCE, MAX_DISTANCE);
         if !self.ortho {
             self.goal.pitch = DEFAULT_PITCH;
+        }
+    }
+
+    /// Frame `points` so they all fit in a `size` viewport inside `pad`
+    /// (left, top, right, bottom, in points), looking from `yaw` / `pitch`.
+    /// The target ends up on the plane `z` so orbiting pivots on the ground.
+    pub fn fit(&mut self, points: &[Vec3], size: Vec2, pad: [f32; 4], yaw: f32, pitch: f32, z: f32) {
+        if points.is_empty() {
+            return;
+        }
+        let size = size.max(Vec2::splat(64.0));
+        let lo = Vec2::new(pad[0], pad[1]);
+        let hi = (size - Vec2::new(pad[2], pad[3])).max(lo + Vec2::splat(16.0));
+        let avail = hi - lo;
+        let center = points.iter().fold(Vec3::ZERO, |a, p| a + *p) / points.len() as f32;
+        let mut pose = Pose { target: Vec3::new(center.x, center.y, z), yaw, pitch, distance: self.goal.distance };
+        if self.ortho {
+            pose.pitch = MAX_PITCH;
+        }
+        let ortho = self.ortho;
+        // Screen bounds of the points, or None if any is behind the camera.
+        let bounds = |pose: &Pose| -> Option<(Vec2, Vec2)> {
+            let v = View::new(pose, ortho, size);
+            let mut a = Vec2::splat(f32::MAX);
+            let mut b = Vec2::splat(f32::MIN);
+            for p in points {
+                let s = v.project(*p)?;
+                a = a.min(s);
+                b = b.max(s);
+            }
+            Some((a, b))
+        };
+        for _ in 0..4 {
+            // Smallest distance at which the projected box fits `avail`.
+            let (mut near, mut far) = (MIN_DISTANCE, MAX_DISTANCE);
+            for _ in 0..40 {
+                let mid = (near * far).sqrt();
+                pose.distance = mid;
+                let fits = bounds(&pose).is_some_and(|(a, b)| {
+                    let d = b - a;
+                    d.x <= avail.x && d.y <= avail.y
+                });
+                if fits {
+                    far = mid;
+                } else {
+                    near = mid;
+                }
+            }
+            pose.distance = far;
+            // Shift the target so the box sits centered in the padded area.
+            let Some((a, b)) = bounds(&pose) else { break };
+            let v = View::new(&pose, ortho, size);
+            let (Some(from), Some(to)) = (v.ray_plane((a + b) * 0.5, z), v.ray_plane((lo + hi) * 0.5, z)) else {
+                break;
+            };
+            pose.target += (from - to).truncate().extend(0.0);
+        }
+        self.goal.target = pose.target;
+        self.goal.distance = pose.distance;
+        self.goal.yaw = yaw;
+        if !self.ortho {
+            self.goal.pitch = pitch;
         }
     }
 
@@ -319,6 +384,32 @@ mod tests {
             assert!(frames < 600, "camera never settled");
         }
         assert_eq!(c.current, c.goal);
+    }
+
+    #[test]
+    fn fit_keeps_every_point_inside_the_padding() {
+        let mut c = OrbitCamera::default();
+        let size = Vec2::new(900.0, 460.0);
+        let pad = [16.0, 52.0, 16.0, 16.0];
+        let pts: Vec<Vec3> = [(0.0, 0.0), (128.0, 0.0), (0.0, 128.0), (128.0, 128.0)]
+            .iter()
+            .flat_map(|&(x, y)| [Vec3::new(x, y, 8.0), Vec3::new(x, y, 20.0)])
+            .collect();
+        c.fit(&pts, size, pad, DEFAULT_YAW, MAP_PITCH, 12.0);
+        c.snap();
+        let v = c.view(size);
+        let mut lo = Vec2::splat(f32::MAX);
+        let mut hi = Vec2::splat(f32::MIN);
+        for p in &pts {
+            let s = v.project(*p).unwrap();
+            lo = lo.min(s);
+            hi = hi.max(s);
+        }
+        assert!(lo.x >= pad[0] - 1.0 && lo.y >= pad[1] - 1.0, "{lo:?}");
+        assert!(hi.x <= size.x - pad[2] + 1.0 && hi.y <= size.y - pad[3] + 1.0, "{hi:?}");
+        // Tight: one axis nearly fills the padded area.
+        let used = (hi - lo) / (size - Vec2::new(pad[0] + pad[2], pad[1] + pad[3]));
+        assert!(used.x.max(used.y) > 0.97, "{used:?}");
     }
 
     #[test]
