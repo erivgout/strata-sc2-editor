@@ -221,30 +221,23 @@ impl ToolState {
                     }
                 }
             }
-            Some(Drag::Box { start, additive }) => {
-                if !input.down {
-                    let (start, additive) = (*start, *additive);
-                    self.drag = None;
-                    let end = input.pointer.unwrap_or(start);
-                    if start.distance(end) < 4.0 {
-                        if !additive {
-                            state.selection.objects.clear();
-                            state.selection.region = None;
-                            state.selection.camera = None;
-                        }
-                    } else {
-                        let lo = start.min(end);
-                        let hi = start.max(end);
-                        if !additive {
-                            state.selection.objects.clear();
-                            state.selection.region = None;
-                            state.selection.camera = None;
-                        }
-                        for o in &state.doc.objects.objects {
-                            if let Some(s) = input.view.project(o.position) {
-                                if s.x >= lo.x && s.y >= lo.y && s.x <= hi.x && s.y <= hi.y {
-                                    state.selection.objects.insert(o.id);
-                                }
+            Some(Drag::Box { start, additive }) if !input.down => {
+                let (start, additive) = (*start, *additive);
+                self.drag = None;
+                let end = input.pointer.unwrap_or(start);
+                if !additive {
+                    state.selection.objects.clear();
+                    state.selection.region = None;
+                    state.selection.camera = None;
+                }
+                // A click without a real drag only clears the selection.
+                if start.distance(end) >= 4.0 {
+                    let lo = start.min(end);
+                    let hi = start.max(end);
+                    for o in &state.doc.objects.objects {
+                        if let Some(s) = input.view.project(o.position) {
+                            if s.x >= lo.x && s.y >= lo.y && s.x <= hi.x && s.y <= hi.y {
+                                state.selection.objects.insert(o.id);
                             }
                         }
                     }
