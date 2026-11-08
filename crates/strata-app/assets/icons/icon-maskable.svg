@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <title>Strata</title>
+  <rect width="512" height="512" rx="0" fill="#1B232D"/>
+  <g fill="none" stroke="#62CDEB" stroke-width="26.52" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M146.8 337.12 L265.36 337.12 L302.8 299.68 L365.2 299.68" stroke-opacity="0.38"/>
+    <path d="M146.8 274.72 L221.68 274.72 L259.12 237.28 L365.2 237.28" stroke-opacity="0.68"/>
+    <path d="M146.8 212.32 L178 212.32 L215.44 174.88 L365.2 174.88" stroke-opacity="1"/>
+  </g>
+</svg>
