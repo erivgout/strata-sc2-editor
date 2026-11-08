@@ -1,4 +1,9 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <rect width="64" height="64" rx="14" fill="#dc2626"/>
-  <text x="32" y="32" dy="0.35em" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, sans-serif" font-size="26" font-weight="600" fill="#ffffff">SC</text>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <title>Strata</title>
+  <rect width="512" height="512" rx="112" fill="#1B232D"/>
+  <g fill="none" stroke="#62CDEB" stroke-width="34" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M116 360 L268 360 L316 312 L396 312" stroke-opacity="0.38"/>
+    <path d="M116 280 L212 280 L260 232 L396 232" stroke-opacity="0.68"/>
+    <path d="M116 200 L156 200 L204 152 L396 152" stroke-opacity="1"/>
+  </g>
 </svg>
