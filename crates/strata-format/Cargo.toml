@@ -1,0 +1,13 @@
+[package]
+name = "strata-format"
+description = "Load and save .SC2Map archives and component folders to and from the Strata document model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+strata-core.workspace = true
+strata-mpq.workspace = true
+thiserror.workspace = true
+quick-xml.workspace = true
+serde_json.workspace = true

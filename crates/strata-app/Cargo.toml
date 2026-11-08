@@ -1,0 +1,35 @@
+[package]
+name = "strata-app"
+description = "Strata: a fast StarCraft II map editor that runs on the web, installs as an app, and runs natively"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "strata"
+path = "src/main.rs"
+
+[dependencies]
+strata-core.workspace = true
+strata-format.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+glam.workspace = true
+eframe = { version = "0.36", default-features = false, features = ["glow", "default_fonts", "persistence", "wayland", "x11"] }
+egui = "0.36"
+egui_dock = { version = "0.21", features = ["serde"] }
+egui_extras = "0.36"
+glow = "0.17"
+log = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+rfd = "0.16"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+env_logger = "0.11"
+tungstenite = "0.27"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["Window", "Document", "HtmlCanvasElement", "Storage", "WebSocket", "MessageEvent", "BinaryType", "Blob", "BlobPropertyBag", "Url", "HtmlAnchorElement", "Navigator", "Element"] }
+js-sys = "0.3"

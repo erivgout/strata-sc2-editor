@@ -1,0 +1,9 @@
+[package]
+name = "strata-mpq"
+description = "Pure-Rust MPQ archive reader/writer (wasm-compatible) for StarCraft II map files"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror.workspace = true

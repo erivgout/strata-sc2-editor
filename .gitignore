@@ -1,0 +1,3 @@
+/target
+/crates/strata-app/dist
+*.pdb

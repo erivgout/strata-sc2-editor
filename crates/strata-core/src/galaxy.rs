@@ -1,0 +1,208 @@
+//! Galaxy script generation from the trigger library.
+//!
+//! Output layout matches what the SC2 editor emits for MapScript.galaxy:
+//! includes, globals, custom script, one function pair per trigger, and
+//! `InitMap()`.
+
+use std::fmt::Write;
+
+use crate::document::MapDocument;
+use crate::triggers::{Call, Expr, Literal, Stmt, Trigger, TriggerLibrary};
+
+/// Galaxy identifier for an editor name: "Melee Initialization" -> "MeleeInitialization".
+pub fn ident(name: &str) -> String {
+    let mut s: String = name.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+    if s.is_empty() || s.starts_with(|c: char| c.is_ascii_digit()) {
+        s.insert(0, '_');
+    }
+    s
+}
+
+pub fn trigger_var(t: &Trigger) -> String {
+    format!("gt_{}", ident(&t.name))
+}
+
+pub fn global_var(name: &str) -> String {
+    format!("gv_{}", ident(name))
+}
+
+fn quote(s: &str) -> String {
+    let mut o = String::with_capacity(s.len() + 2);
+    o.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => o.push_str("\\\""),
+            '\\' => o.push_str("\\\\"),
+            '\n' => o.push_str("\\n"),
+            c => o.push(c),
+        }
+    }
+    o.push('"');
+    o
+}
+
+pub fn expr(e: &Expr, lib: &TriggerLibrary) -> String {
+    match e {
+        Expr::Literal(Literal::Int(v)) => v.to_string(),
+        Expr::Literal(Literal::Fixed(v)) => {
+            let s = format!("{v}");
+            if s.contains('.') { s } else { format!("{s}.0") }
+        }
+        Expr::Literal(Literal::Bool(b)) => b.to_string(),
+        Expr::Literal(Literal::String(s)) => quote(s),
+        Expr::Literal(Literal::Text(k)) => format!("StringExternal({})", quote(k)),
+        Expr::Variable(v) => {
+            if lib.variables.iter().any(|g| &g.name == v) { global_var(v) } else { format!("lv_{}", ident(v)) }
+        }
+        Expr::Call(c) => call(c, lib, None),
+        Expr::Preset(p) => p.clone(),
+        Expr::Placed(n) => format!("PointFromName({})", quote(n)),
+        Expr::Binary { op, lhs, rhs } => format!("({} {} {})", expr(lhs, lib), op, expr(rhs, lib)),
+        Expr::Not(e) => format!("!({})", expr(e, lib)),
+        Expr::Raw(r) => r.clone(),
+    }
+}
+
+fn call(c: &Call, lib: &TriggerLibrary, first: Option<&str>) -> String {
+    let mut args: Vec<String> = first.map(|f| vec![f.to_owned()]).unwrap_or_default();
+    args.extend(c.args.iter().map(|a| expr(a, lib)));
+    format!("{}({})", c.function, args.join(", "))
+}
+
+fn stmts(out: &mut String, body: &[Stmt], lib: &TriggerLibrary, depth: usize) {
+    let pad = "    ".repeat(depth);
+    for s in body {
+        match s {
+            Stmt::Call(c) => {
+                let _ = writeln!(out, "{pad}{};", call(c, lib, None));
+            }
+            Stmt::Set { variable, value } => {
+                let _ = writeln!(out, "{pad}{} = {};", expr(&Expr::Variable(variable.clone()), lib), expr(value, lib));
+            }
+            Stmt::If { cond, then, otherwise } => {
+                let _ = writeln!(out, "{pad}if ({}) {{", expr(cond, lib));
+                stmts(out, then, lib, depth + 1);
+                if otherwise.is_empty() {
+                    let _ = writeln!(out, "{pad}}}");
+                } else {
+                    let _ = writeln!(out, "{pad}}}\n{pad}else {{");
+                    stmts(out, otherwise, lib, depth + 1);
+                    let _ = writeln!(out, "{pad}}}");
+                }
+            }
+            Stmt::While { cond, body } => {
+                let _ = writeln!(out, "{pad}while ({}) {{", expr(cond, lib));
+                stmts(out, body, lib, depth + 1);
+                let _ = writeln!(out, "{pad}}}");
+            }
+            Stmt::For { variable, from, to, body } => {
+                let v = expr(&Expr::Variable(variable.clone()), lib);
+                let _ = writeln!(out, "{pad}{v} = {};", expr(from, lib));
+                let _ = writeln!(out, "{pad}while ({v} <= {}) {{", expr(to, lib));
+                stmts(out, body, lib, depth + 1);
+                let _ = writeln!(out, "{pad}    {v} += 1;\n{pad}}}");
+            }
+            Stmt::Wait(e) => {
+                let _ = writeln!(out, "{pad}Wait({}, c_timeGame);", expr(e, lib));
+            }
+            Stmt::Return => {
+                let _ = writeln!(out, "{pad}return true;");
+            }
+            Stmt::Comment(c) => {
+                for line in c.lines() {
+                    let _ = writeln!(out, "{pad}// {line}");
+                }
+            }
+            Stmt::Raw(r) => {
+                for line in r.lines() {
+                    let _ = writeln!(out, "{pad}{line}");
+                }
+            }
+        }
+    }
+}
+
+/// Generate MapScript.galaxy for a document.
+pub fn generate(doc: &MapDocument) -> String {
+    let lib = &doc.triggers;
+    let mut o = String::new();
+    let _ = writeln!(o, "//==================================================");
+    let _ = writeln!(o, "// Generated by Strata for {}", doc.info.name);
+    let _ = writeln!(o, "//==================================================\n");
+    let _ = writeln!(o, "include \"TriggerLibs/NativeLib\"\ninclude \"TriggerLibs/LibertyLib\"\n");
+
+    let _ = writeln!(o, "// Variables");
+    for v in &lib.variables {
+        let arr = v.array_len.map(|n| format!("[{n}]")).unwrap_or_default();
+        let _ = writeln!(o, "{} {}{};", v.ty.galaxy_name(), global_var(&v.name), arr);
+    }
+    let _ = writeln!(o, "\nvoid InitGlobals () {{");
+    for v in &lib.variables {
+        if let (Some(init), None) = (&v.initial, v.array_len) {
+            let _ = writeln!(o, "    {} = {};", global_var(&v.name), expr(init, lib));
+        }
+    }
+    let _ = writeln!(o, "}}\n");
+
+    if !lib.custom_script.trim().is_empty() {
+        let _ = writeln!(o, "// Custom script\n{}\n", lib.custom_script.trim_end());
+    }
+
+    let triggers = lib.triggers();
+    let _ = writeln!(o, "// Trigger variables");
+    for t in &triggers {
+        let _ = writeln!(o, "trigger {};", trigger_var(t));
+    }
+    o.push('\n');
+
+    for t in &triggers {
+        let name = ident(&t.name);
+        let tv = trigger_var(t);
+        let _ = writeln!(o, "//--------------------------------------------------");
+        let _ = writeln!(o, "// Trigger: {}", t.name);
+        let _ = writeln!(o, "//--------------------------------------------------");
+        let _ = writeln!(o, "bool gt_{name}_Func (bool testConds, bool runActions) {{");
+        if !t.conditions.is_empty() {
+            let _ = writeln!(o, "    if (testConds) {{");
+            for c in &t.conditions {
+                let _ = writeln!(o, "        if (!({})) {{\n            return false;\n        }}", expr(c, lib));
+            }
+            let _ = writeln!(o, "    }}");
+        }
+        let _ = writeln!(o, "    if (!runActions) {{\n        return true;\n    }}");
+        stmts(&mut o, &t.actions, lib, 1);
+        let _ = writeln!(o, "    return true;\n}}\n");
+        let _ = writeln!(o, "void gt_{name}_Init () {{");
+        let _ = writeln!(o, "    {tv} = TriggerCreate(\"gt_{name}_Func\");");
+        if !t.enabled || !t.initially_on {
+            let _ = writeln!(o, "    TriggerEnable({tv}, false);");
+        }
+        for e in &t.events {
+            let _ = writeln!(o, "    {};", call(e, lib, Some(&tv)));
+        }
+        let _ = writeln!(o, "}}\n");
+    }
+
+    let _ = writeln!(o, "void InitTriggers () {{");
+    for t in &triggers {
+        let _ = writeln!(o, "    gt_{}_Init();", ident(&t.name));
+    }
+    let _ = writeln!(o, "}}\n");
+    let _ = writeln!(o, "void InitMap () {{\n    InitLibs();\n    InitGlobals();\n    InitTriggers();\n}}");
+    o
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn melee_init_generates() {
+        let doc = MapDocument::new("Test", 64, 64);
+        let s = generate(&doc);
+        assert!(s.contains("bool gt_MeleeInitialization_Func"));
+        assert!(s.contains("TriggerAddEventMapInit(gt_MeleeInitialization);"));
+        assert!(s.contains("MeleeInitResources();"));
+        assert!(s.contains("void InitMap ()"));
+    }
+}
