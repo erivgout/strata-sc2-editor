@@ -72,7 +72,7 @@ fn roundtrip_many_files() {
     }
     let bytes = b.build().unwrap();
     let a = Archive::from_bytes(bytes).unwrap();
-    assert_eq!(a.format_version(), 2);
+    assert_eq!(a.format_version(), 3);
     assert!(!a.uses_het_bet());
 
     let listed = a.files();
@@ -388,4 +388,84 @@ fn corrupt_archives_do_not_panic() {
             let _ = a.read("(attributes)");
         }
     }
+}
+
+fn le32(b: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes(b[at..at + 4].try_into().unwrap())
+}
+fn le64(b: &[u8], at: usize) -> u64 {
+    u64::from_le_bytes(b[at..at + 8].try_into().unwrap())
+}
+fn md5_of(data: &[u8]) -> [u8; 16] {
+    <md5::Md5 as md5::Digest>::digest(data).into()
+}
+
+/// Regression: StormLib forces `.SC2Map` headers newer than v2 to v4 and
+/// rejects them with ERROR_FAKE_MPQ_HEADER (10009) unless they are a full
+/// v4 header with a valid header MD5. Pin every field StormLib checks.
+fn check_v4_header(bytes: &[u8], base: usize) {
+    let h = &bytes[base..base + 0xD0];
+    let archive_len = (bytes.len() - base) as u64;
+    assert_eq!(&h[0..4], b"MPQ\x1A");
+    assert_eq!(le32(h, 0x04), 0xD0, "header size");
+    assert_eq!(le32(h, 0x08) as u64, archive_len, "dwArchiveSize");
+    assert_eq!(
+        u16::from_le_bytes([h[0x0C], h[0x0D]]),
+        3,
+        "wFormatVersion = v4"
+    );
+    assert_eq!(u16::from_le_bytes([h[0x0E], h[0x0F]]), 5, "sector shift");
+    let hash_pos = le32(h, 0x10) as usize;
+    let block_pos = le32(h, 0x14) as usize;
+    let hash_count = le32(h, 0x18) as usize;
+    let block_count = le32(h, 0x1C) as usize;
+    assert!(hash_count.is_power_of_two() && hash_count >= 16);
+    assert_eq!(le64(h, 0x20), 0, "HiBlockTablePos64 (archive < 4 GiB)");
+    assert_eq!(&h[0x28..0x2C], &[0; 4], "hash/block pos high words");
+    assert_eq!(le64(h, 0x2C), archive_len, "ArchiveSize64");
+    assert_eq!(le64(h, 0x34), 0, "BetTablePos64");
+    assert_eq!(le64(h, 0x3C), 0, "HetTablePos64");
+    assert_eq!(le64(h, 0x44), (hash_count * 16) as u64, "HashTableSize64");
+    assert_eq!(le64(h, 0x4C), (block_count * 16) as u64, "BlockTableSize64");
+    assert_eq!(
+        &h[0x54..0x70],
+        &[0; 28],
+        "hi-block/HET/BET sizes, raw chunk size"
+    );
+    let hash = &bytes[base + hash_pos..base + hash_pos + hash_count * 16];
+    let block = &bytes[base + block_pos..base + block_pos + block_count * 16];
+    assert_eq!(
+        block_pos,
+        hash_pos + hash_count * 16,
+        "block follows hash table"
+    );
+    assert_eq!(
+        (block_pos + block_count * 16) as u64,
+        archive_len,
+        "block table ends archive"
+    );
+    assert_eq!(h[0x70..0x80], md5_of(block), "MD5_BlockTable");
+    assert_eq!(h[0x80..0x90], md5_of(hash), "MD5_HashTable");
+    assert_eq!(&h[0x90..0xC0], &[0; 48], "hi-block/BET/HET MD5s");
+    assert_eq!(h[0xC0..0xD0], md5_of(&h[..0xC0]), "MD5_MpqHeader");
+}
+
+#[test]
+fn header_is_stormlib_valid_v4() {
+    let mut b = ArchiveBuilder::new();
+    for (n, d) in sample_files() {
+        b.add(&n, d);
+    }
+    let bytes = b.build().unwrap();
+    check_v4_header(&bytes, 0);
+
+    let mut b = ArchiveBuilder::new().with_user_data(b"user data".to_vec());
+    b.add("a.txt", b"hello".to_vec());
+    let bytes = b.build().unwrap();
+    // User-data block: cbUserDataSize, dwHeaderOffs, cbUserDataHeader.
+    assert_eq!(&bytes[0..4], b"MPQ\x1B");
+    assert_eq!(le32(&bytes, 4), 512 - 16);
+    assert_eq!(le32(&bytes, 8), 512);
+    assert_eq!(le32(&bytes, 12), 9);
+    check_v4_header(&bytes, 512);
 }

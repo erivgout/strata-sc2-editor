@@ -1,11 +1,13 @@
 //! Archive writing.
 //!
 //! Output layout (all offsets relative to the MPQ header):
-//! `[optional MPQ\x1B user data, padded to 512][v3 header (68 bytes)]`
+//! `[optional MPQ\x1B user data, padded to 512][v4 header (208 bytes)]`
 //! `[file data...][hash table][block table]`.
 //!
-//! The header is format v3 with only classic (encrypted) hash/block tables;
-//! no HET/BET, which StormLib, MPQEditor and SC2 accept. Files up to one
+//! The header is format v4 with only classic (encrypted) hash/block tables
+//! (no HET/BET), carrying table sizes and the table + header MD5s. It must be
+//! v4: StormLib treats any `.SC2Map` header newer than v2 as v4 and rejects
+//! it with `ERROR_FAKE_MPQ_HEADER` unless the header MD5 is valid. Files up to one
 //! sector are written as a single compressed unit and larger files as
 //! sectors, each zlib-compressed when that makes it smaller -- the same
 //! layout the SC2 editor produces. `(listfile)` and `(attributes)`
@@ -21,11 +23,11 @@ use crate::crypt::{
 };
 use crate::{MpqError, FLAG_COMPRESS, FLAG_EXISTS, FLAG_SINGLE_UNIT};
 
-const HEADER_SIZE_V3: usize = 68;
+const HEADER_SIZE_V4: usize = 0xD0;
 const LISTFILE: &str = "(listfile)";
 const ATTRIBUTES: &str = "(attributes)";
 
-/// Builds a new MPQ archive (format v3, as SC2 expects) in memory.
+/// Builds a new MPQ archive (format v4, as SC2 expects) in memory.
 pub struct ArchiveBuilder {
     files: Vec<(String, Vec<u8>)>,
     sector_shift: u16,
@@ -144,7 +146,7 @@ impl ArchiveBuilder {
         };
         let payload: usize = entries.iter().map(|(_, d)| d.len()).sum();
         out.reserve(
-            base + HEADER_SIZE_V3 + payload + payload / 64 + hash_count * 16 + total_files * 16,
+            base + HEADER_SIZE_V4 + payload + payload / 64 + hash_count * 16 + total_files * 16,
         );
         if let Some(ud) = &user_data {
             out.extend_from_slice(b"MPQ\x1B");
@@ -154,7 +156,7 @@ impl ArchiveBuilder {
             out.extend_from_slice(ud);
             out.resize(base, 0);
         }
-        out.resize(base + HEADER_SIZE_V3, 0);
+        out.resize(base + HEADER_SIZE_V4, 0);
 
         let mut blocks = Vec::with_capacity(total_files);
         let mut crcs = Vec::with_capacity(total_files);
@@ -207,19 +209,28 @@ impl ArchiveBuilder {
         out.extend_from_slice(&table);
         let archive_size = rel(&out, base)?;
 
-        let h = &mut out[base..base + HEADER_SIZE_V3];
-        h[0..4].copy_from_slice(b"MPQ\x1A");
-        h[4..8].copy_from_slice(&(HEADER_SIZE_V3 as u32).to_le_bytes());
-        h[8..12].copy_from_slice(&archive_size.to_le_bytes());
-        h[12..14].copy_from_slice(&2u16.to_le_bytes()); // format v3
-        h[14..16].copy_from_slice(&sector_shift.to_le_bytes());
-        h[16..20].copy_from_slice(&hash_pos.to_le_bytes());
-        h[20..24].copy_from_slice(&block_pos.to_le_bytes());
-        h[24..28].copy_from_slice(&(hash_count as u32).to_le_bytes());
-        h[28..32].copy_from_slice(&(blocks.len() as u32).to_le_bytes());
-        // 32..44: hi-block table pos (0), hash/block pos high words (0).
-        h[44..52].copy_from_slice(&(archive_size as u64).to_le_bytes());
-        // 52..68: BET/HET positions (0 = absent).
+        let h = &mut out[base..base + HEADER_SIZE_V4];
+        h[0x00..0x04].copy_from_slice(b"MPQ\x1A");
+        h[0x04..0x08].copy_from_slice(&(HEADER_SIZE_V4 as u32).to_le_bytes());
+        h[0x08..0x0C].copy_from_slice(&archive_size.to_le_bytes());
+        h[0x0C..0x0E].copy_from_slice(&3u16.to_le_bytes()); // format v4
+        h[0x0E..0x10].copy_from_slice(&sector_shift.to_le_bytes());
+        h[0x10..0x14].copy_from_slice(&hash_pos.to_le_bytes());
+        h[0x14..0x18].copy_from_slice(&block_pos.to_le_bytes());
+        h[0x18..0x1C].copy_from_slice(&(hash_count as u32).to_le_bytes());
+        h[0x1C..0x20].copy_from_slice(&(blocks.len() as u32).to_le_bytes());
+        // 0x20..0x2C: hi-block table pos (0), hash/block pos high words (0).
+        h[0x2C..0x34].copy_from_slice(&(archive_size as u64).to_le_bytes());
+        // 0x34..0x44: BET/HET positions (0 = absent).
+        h[0x44..0x4C].copy_from_slice(&(hash.len() as u64).to_le_bytes());
+        h[0x4C..0x54].copy_from_slice(&(table.len() as u64).to_le_bytes());
+        // 0x54..0x6C: hi-block/HET/BET sizes (0); 0x6C: raw chunk size (0 = no
+        // per-chunk MD5s after file data).
+        h[0x70..0x80].copy_from_slice(&crate::attributes::md5(&table));
+        h[0x80..0x90].copy_from_slice(&crate::attributes::md5(&hash));
+        // 0x90..0xC0: hi-block/BET/HET MD5s (zero = absent).
+        let header_md5 = crate::attributes::md5(&h[..0xC0]);
+        h[0xC0..0xD0].copy_from_slice(&header_md5);
         Ok(out)
     }
 }
