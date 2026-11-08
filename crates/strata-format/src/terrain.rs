@@ -257,6 +257,9 @@ fn quantization(values: impl Iterator<Item = f64>) -> (f64, f64, String, String)
         lo = 0.0;
         hi = 0.0;
     }
+    // Editor files always cover 0 (quantizeBias >= 1).
+    lo = lo.min(0.0);
+    hi = hi.max(0.0);
     let (qb_s, qs_s) = (fmt_sci(1.0 - lo), fmt_sci((hi - lo + 2.0) / 65535.0));
     (qb_s.parse().unwrap_or(1.0), qs_s.parse().unwrap_or(1.0), qb_s, qs_s)
 }
@@ -412,8 +415,8 @@ pub fn save(doc: &MapDocument, orig: &FileMap, out: &mut FileMap) {
             let (sx, sy) = m.scale(cells);
             let vx = cells.0 + 1;
             for (l, layer0) in w0.iter().enumerate() {
-                for v in 0..verts {
-                    if cur(l, v) == layer0[v] {
+                for (v, &w0v) in layer0.iter().enumerate().take(verts) {
+                    if cur(l, v) == w0v {
                         continue;
                     }
                     let d = buf.get_or_insert_with(|| m0.to_vec());

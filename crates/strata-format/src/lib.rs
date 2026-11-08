@@ -159,7 +159,7 @@ pub fn load_files(files: FileMap) -> Result<MapDocument, FormatError> {
             recs.iter()
                 .enumerate()
                 .map(|(i, r)| {
-                    let name = text(&info::player_name_key(i)).unwrap_or_else(|| format!("Player {}", r.id));
+                    let name = text(&info::player_name_key(i)).unwrap_or_else(|| info::fallback_player_name(r.id));
                     let start = (r.start_point != 0)
                         .then(|| objects.iter().find(|o| o.id.0 == r.start_point).map(|o| o.position.truncate()))
                         .flatten();
@@ -223,18 +223,32 @@ fn file_players(doc: &MapDocument, new: bool) -> Vec<Player> {
 
 /// `doc.strings` with the info-derived keys (name, description, author,
 /// player names) applied to the default locale.
+///
+/// A key missing from GameStrings is only added when its value differs from
+/// what loading produced without it (the DocumentHeader copy, or the
+/// synthesized "Player N"), so unedited maps stay byte-identical.
 fn effective_strings(doc: &MapDocument, new: bool) -> strata_core::strings::Strings {
+    let header = lookup(&doc.passthrough, DOCUMENT_HEADER).and_then(|b| info::parse_header(b).ok());
+    let from_header = |key: &str| -> Option<String> {
+        header.as_ref()?.entries.iter().find(|(k, l, _)| k == key && l == DEFAULT_LOCALE).map(|(_, _, v)| v.clone())
+    };
     let mut s = doc.strings.clone();
-    let mut set = |key: &str, value: &str| {
-        if !value.is_empty() || s.get(DEFAULT_LOCALE, key).is_some() {
+    let mut set = |key: &str, value: &str, baseline: String| {
+        let exists = s.get(DEFAULT_LOCALE, key).is_some();
+        let write = exists || if new { !value.is_empty() } else { value != baseline };
+        if write {
             s.set(DEFAULT_LOCALE, key, value);
         }
     };
-    set("DocInfo/Name", &doc.info.name);
-    set("DocInfo/DescLong", &doc.info.description);
-    set("DocInfo/Author", &doc.info.author);
+    for (key, value) in
+        [("DocInfo/Name", &doc.info.name), ("DocInfo/DescLong", &doc.info.description), ("DocInfo/Author", &doc.info.author)]
+    {
+        set(key, value, from_header(key).unwrap_or_default());
+    }
     for (i, p) in file_players(doc, new).iter().enumerate() {
-        set(&info::player_name_key(i), &p.name);
+        let key = info::player_name_key(i);
+        let baseline = from_header(&key).unwrap_or_else(|| info::fallback_player_name(p.id));
+        set(&key, &p.name, baseline);
     }
     s
 }
@@ -264,9 +278,7 @@ fn save_info(doc: &MapDocument, new: bool, strings: &strata_core::strings::Strin
                 put(out, DOCUMENT_INFO, docinfo::patch_dependencies(&d, &doc.info.dependencies));
             }
         }
-        None if lookup(orig, DOCUMENT_INFO).is_none() => {
-            put(out, DOCUMENT_INFO, docinfo::new_document_info(&doc.info.dependencies))
-        }
+        None if new => put(out, DOCUMENT_INFO, docinfo::new_document_info(&doc.info.dependencies)),
         None => {}
     }
 
@@ -274,11 +286,11 @@ fn save_info(doc: &MapDocument, new: bool, strings: &strata_core::strings::Strin
     let mut wanted: Vec<String> = ["DocInfo/Name", "DocInfo/DescLong", "DocInfo/DescShort"].map(String::from).to_vec();
     wanted.extend((0..players.len()).map(info::player_name_key));
     let header = match lookup(orig, DOCUMENT_HEADER) {
-        Some(b) => match info::parse_header(b) {
-            Ok(h) => Some(h),
-            Err(_) => None, // unknown version: keep as is
-        },
-        None => Some(info::Header { prefix: info::new_header_prefix(), deps: Vec::new(), entries: Vec::new(), tail: Vec::new() }),
+        Some(b) => info::parse_header(b).ok(), // unknown version: keep as is
+        None if new => {
+            Some(info::Header { prefix: info::new_header_prefix(), deps: Vec::new(), entries: Vec::new(), tail: Vec::new() })
+        }
+        None => None,
     };
     if let Some(mut h) = header {
         h.deps = doc.info.dependencies.clone();
@@ -349,7 +361,7 @@ fn save_components(doc: &MapDocument, new: bool, out: &mut FileMap) {
     }
     let created = |name: &str| lookup(out, name).is_some() && (new || lookup(orig, name).is_none());
     let mut wanted: Vec<docinfo::Component> = Vec::new();
-    if new || out.keys().any(|k| catalog::file_of(k).is_some() && lookup(orig, k).is_none()) {
+    if out.keys().any(|k| catalog::file_of(k).is_some() && created(k)) {
         wanted.push(docinfo::comp("gada", None, "GameData"));
     }
     for k in out.keys() {
@@ -394,13 +406,15 @@ pub fn save_files(doc: &MapDocument) -> Result<FileMap, FormatError> {
     }
     if d.objects || d.cameras {
         let orig = parse_xml(&doc.passthrough, OBJECTS);
-        if orig.is_some() || lookup(&doc.passthrough, OBJECTS).is_none() {
+        let absent = lookup(&doc.passthrough, OBJECTS).is_none();
+        let empty = doc.objects.objects.is_empty() && doc.cameras.is_empty();
+        if orig.is_some() || (absent && (new || !empty)) {
             put_if_changed(&mut out, OBJECTS, objects::write(orig.as_ref(), &doc.objects.objects, &doc.cameras));
         }
     }
     if d.regions {
         let orig = parse_xml(&doc.passthrough, REGIONS);
-        if orig.is_some() || lookup(&doc.passthrough, REGIONS).is_none() {
+        if orig.is_some() || (lookup(&doc.passthrough, REGIONS).is_none() && !doc.regions.is_empty()) {
             put_if_changed(&mut out, REGIONS, regions::write(orig.as_ref(), &doc.regions));
         }
     }

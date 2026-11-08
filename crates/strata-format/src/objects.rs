@@ -372,7 +372,7 @@ mod tests {
         let mut p = PlacedObject::new(ObjectId(3), ObjectKind::Point, "", Vec3::new(5.0, 6.0, 0.0));
         p.name = "Spawn".into();
         let cam = Camera::new(ObjectId(4), "Intro", Vec2::new(10.0, 12.0));
-        let out = write(None, &[p.clone()], &[cam.clone()]);
+        let out = write(None, std::slice::from_ref(&p), std::slice::from_ref(&cam));
         let doc = xml::parse_bytes(&out).unwrap();
         let (o, c) = parse(&doc);
         p.type_id = "Normal".into();

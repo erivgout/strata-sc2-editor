@@ -435,6 +435,11 @@ pub fn new_recs(players: &[Player]) -> Vec<Player> {
     all
 }
 
+/// Name given to a player whose name string is missing.
+pub fn fallback_player_name(id: u8) -> String {
+    format!("Player {id}")
+}
+
 pub fn player_name_key(index: usize) -> String {
     format!("MapInfo/Player{index:02}/Name")
 }
