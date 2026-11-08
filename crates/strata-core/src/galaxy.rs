@@ -1199,7 +1199,7 @@ pub fn lint(src: &str) -> Vec<Diagnostic> {
         i += 1;
     }
 
-    diags.sort_by(|a, b| (a.line, a.col).cmp(&(b.line, b.col)));
+    diags.sort_by_key(|d| (d.line, d.col));
     diags.dedup();
     diags
 }
@@ -1212,10 +1212,7 @@ mod tests {
     use crate::triggers::{SwitchCase, TriggerItem};
 
     fn lib_with(t: Trigger) -> TriggerLibrary {
-        let mut lib = TriggerLibrary::default();
-        lib.next_id = 10;
-        lib.items.push(TriggerItem::Trigger(t));
-        lib
+        TriggerLibrary { next_id: 10, items: vec![TriggerItem::Trigger(t)], ..Default::default() }
     }
 
     #[test]
