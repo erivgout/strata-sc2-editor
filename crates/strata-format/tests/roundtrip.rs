@@ -78,6 +78,10 @@ fn new_map_has_complete_file_set_and_reloads() {
     ] {
         assert!(files.contains_key(f), "missing {f}");
     }
+    // The game rejects a map whose MapInfo integrity hash is wrong.
+    let mi = strata_format::info::parse_mapinfo(&files["MapInfo"]).unwrap();
+    let want = strata_format::info::integrity_hash(&mi.tileset, mi.width, mi.height, mi.bounds, mi.flags.unwrap());
+    assert_eq!(mi.hash, Some(want));
     let comps = String::from_utf8(files["ComponentList.SC2Components"].clone()).unwrap();
     for ty in ["gada", "info", "mapi", "terr", "plob", "regi", "Locale=\"enUS\"", "Locale=\"deDE\""] {
         assert!(comps.contains(ty), "ComponentList lacks {ty}: {comps}");
