@@ -1280,11 +1280,13 @@ fn editor_ui(ui: &mut Ui, state: &mut EditorState) {
     }
     if let Some(c) = new_cursor {
         state.ui.triggers.cursor = Some((id, c));
+        state.ui.triggers.scroll_to_cursor = true;
     }
     if let Some(clip) = paste {
         let cur = state.ui.triggers.cursor.as_ref().filter(|(i, _)| *i == id).map(|(_, l)| l.clone());
         if let Some(c) = paste_clip(&mut work, cur.as_ref(), clip) {
             state.ui.triggers.cursor = Some((id, c));
+            state.ui.triggers.scroll_to_cursor = true;
             label = Some("Paste".into());
         }
     }
@@ -1295,10 +1297,14 @@ fn editor_ui(ui: &mut Ui, state: &mut EditorState) {
         if let Some(c) = insert_choice(&mut work, &at, &choice, &state.doc.triggers) {
             state.ui.triggers.cursor = Some((id, c));
             state.ui.triggers.focus = Focus::Editor;
+            state.ui.triggers.scroll_to_cursor = true;
             label = Some(format!("Add {}", choice_label(&choice, &state.doc.triggers)));
         }
     }
 
+    if state.ui.triggers.scroll_to_cursor {
+        ctx.request_repaint();
+    }
     if reveal {
         state.ui.script.reveal(id);
         state.request(AppAction::FocusTab(Tab::Script));
@@ -1962,6 +1968,9 @@ fn expr_label(cx: &Cx, e: &Expr, slot: &Slot) -> (String, Color32) {
             _ => ("(empty text)".into(), tk.warn),
         },
         Expr::Variable(v) => (v.clone(), if cx.var(v).is_some() { tk.text } else { tk.error }),
+        Expr::Preset(p) if !slot.bits && slot.presets.iter().any(|(_, v)| v == p) => {
+            (slot.presets.iter().find(|(_, v)| v == p).map(|(l, _)| (*l).to_owned()).unwrap_or_default(), tk.text)
+        }
         Expr::Preset(p) if p == "null" => ("none".into(), tk.text),
         Expr::Preset(p) if slot.bits || p.contains('|') => (bits_label(slot, p), tk.text),
         Expr::Preset(p) => (slot.presets.iter().find(|(_, v)| v == p).map(|(l, _)| (*l).to_owned()).unwrap_or_else(|| p.clone()), tk.text),
@@ -2094,7 +2103,13 @@ fn slot_ui(ui: &mut Ui, cx: &mut Cx, e: &mut Expr, slot: &Slot, id: Id, depth: u
 }
 
 fn type_word(ty: &str) -> String {
-    GalaxyType::from_name(ty).label()
+    match ty {
+        "unitref" => "Unit".into(),
+        "abilcmd" => "Ability command".into(),
+        "camerainfo" => "Camera".into(),
+        "soundlink" => "Sound link".into(),
+        _ => GalaxyType::from_name(ty).label(),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

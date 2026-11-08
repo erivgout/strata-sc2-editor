@@ -83,11 +83,11 @@ fn palette(tk: &Tokens) -> Palette {
     Palette {
         text: tk.text,
         comment: tk.text_dim,
-        keyword: tk.text.lerp_to_gamma(tk.accent, 0.55),
-        ty: tk.text.lerp_to_gamma(tk.accent, 0.3),
+        keyword: tk.text.lerp_to_gamma(tk.accent, 0.85),
+        ty: tk.text.lerp_to_gamma(tk.accent, 0.55),
         string: tk.ok,
         number: tk.warn,
-        constant: tk.text.lerp_to_gamma(tk.warn, 0.5),
+        constant: tk.text.lerp_to_gamma(tk.warn, 0.6),
         call: tk.text.lerp_to_gamma(tk.ok, 0.25),
     }
 }

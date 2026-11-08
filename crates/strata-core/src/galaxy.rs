@@ -294,6 +294,29 @@ impl<'a> Gen<'a> {
                 _ => format!("UnitRefFromUnit({})", self.expr(e, Some("unit"))),
             };
         }
+        // Galaxy has no implicit conversions; insert the ones the editor would.
+        if let (Some(want), false) = (expected, matches!(e, Expr::Literal(_) | Expr::Raw(_) | Expr::Preset(_))) {
+            if let Some(have) = self.infer(e) {
+                let conv = match (have.as_str(), want) {
+                    ("int", "fixed") => Some(("IntToFixed", "")),
+                    ("fixed", "int") => Some(("FixedToInt", "")),
+                    ("int", "text") => Some(("IntToText", "")),
+                    ("fixed", "text") => Some(("FixedToText", ", c_fixedPrecisionAny")),
+                    ("string", "text") => Some(("StringToText", "")),
+                    ("int", "string") => Some(("IntToString", "")),
+                    ("fixed", "string") => Some(("FixedToString", ", c_fixedPrecisionAny")),
+                    _ => None,
+                };
+                if let Some((f, extra)) = conv {
+                    let inner = self.expr_plain(e, Some(&have));
+                    return format!("{f}({inner}{extra})");
+                }
+            }
+        }
+        self.expr_plain(e, expected)
+    }
+
+    fn expr_plain(&mut self, e: &Expr, expected: Option<&str>) -> String {
         match e {
             Expr::Literal(Literal::Int(v)) => match expected {
                 Some("fixed") => fixed_literal(*v as f64),
@@ -1456,8 +1479,14 @@ void InitMap () {
             function: "UIDisplayMessage".into(),
             args: vec![Expr::unset(), Expr::unset(), Expr::Literal(Literal::String("hi".into()))],
         }));
+        t.locals.push(Variable::new("n", GalaxyType::Int));
+        t.locals.push(Variable::new("label", GalaxyType::Text));
+        t.actions.push(Stmt::Wait(Expr::Variable("n".into())));
+        t.actions.push(Stmt::Set { variable: "label".into(), value: Expr::Variable("n".into()), index: None });
         doc.triggers = lib_with(t);
         let s = generate(&doc);
+        assert!(s.contains("Wait(IntToFixed(lv_n), c_timeGame);"), "{s}");
+        assert!(s.contains("lv_label = IntToText(lv_n);"), "{s}");
         assert!(s.contains("TriggerAddEventUnitRegion(gt_T, UnitRefFromUnit(UnitFromId(8)), RegionFromId(9), true);"), "{s}");
         assert!(s.contains("UnitSetPosition(UnitFromId(8), PointFromId(7), false);"));
         assert!(s.contains("UIDisplayMessage(null, 0, StringToText(\"hi\"));"));

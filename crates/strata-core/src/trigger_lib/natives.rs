@@ -1,6 +1,6 @@
 //! Generated from the StarCraft II NativeLib trigger library (game build 98310)
-//! by a one-off script; signatures, presets and phrases are the game's own.
-//! Regenerate rather than hand-edit.
+//! by gen_natives.py from the identifiers in natives.txt; signatures, presets
+//! and phrases are the game's own. Regenerate rather than hand-edit.
 
 use super::{Def, FnKind, FnSpec as F, ParamSpec as P};
 
