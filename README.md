@@ -153,7 +153,7 @@ docs/DESIGN.md     Design system: tokens, type, layout, principles
 Read [docs/DESIGN.md](docs/DESIGN.md) before changing the UI. Run
 `cargo test --workspace` and
 `cargo check -p strata-app --target wasm32-unknown-unknown` before sending a
-change; CI runs both plus a release web build.
+change.
 
 ## License
 
