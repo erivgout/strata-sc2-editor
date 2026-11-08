@@ -36,7 +36,7 @@ fn main() {
     for i in 0..3 {
         let f = i as f32;
         run(&mut doc, Op::PlaceObject { kind: ObjectKind::Unit, type_id: "Marine".into(), x: 22.0 + f, y: 20.0, player: Some(1), rotation: 0.0, name: String::new() });
-        run(&mut doc, Op::PlaceObject { kind: ObjectKind::Unit, type_id: "Zergling".into(), x: 42.0 + f, y: 44.0, player: Some(2), rotation: 3.14, name: String::new() });
+        run(&mut doc, Op::PlaceObject { kind: ObjectKind::Unit, type_id: "Zergling".into(), x: 42.0 + f, y: 44.0, player: Some(2), rotation: std::f32::consts::PI, name: String::new() });
     }
 
     // Map init: show a message so the run is visibly ours.

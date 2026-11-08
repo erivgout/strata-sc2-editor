@@ -293,16 +293,37 @@ fn save_info(doc: &MapDocument, new: bool, strings: &strata_core::strings::Strin
         None => None,
     };
     if let Some(mut h) = header {
-        h.deps = doc.info.dependencies.clone();
+        // Only carry over values that changed since load: editor headers are
+        // often stale copies, and an unedited save must not touch them.
+        let baseline_deps = parse_xml(orig, DOCUMENT_INFO).map(|d| docinfo::parse_dependencies(&d)).unwrap_or(h.deps.clone());
+        if new || doc.info.dependencies != baseline_deps {
+            h.deps = doc.info.dependencies.clone();
+        }
+        let mut locales: Vec<String> = h.entries.iter().map(|(_, l, _)| l.clone()).collect();
+        locales.push(DEFAULT_LOCALE.to_owned());
+        locales.sort();
+        locales.dedup();
+        let orig_strings: BTreeMap<String, BTreeMap<String, String>> = locales
+            .into_iter()
+            .map(|l| {
+                let m = lookup(orig, &strings::path(&l)).map(strings::parse).unwrap_or_default();
+                (l, m)
+            })
+            .collect();
+        let changed = |l: &str, k: &str| -> Option<String> {
+            let cur = strings.get(l, k)?;
+            let was = orig_strings.get(l).and_then(|m| m.get(k)).map(String::as_str);
+            (new || was != Some(cur)).then(|| cur.to_owned())
+        };
         for (k, l, v) in h.entries.iter_mut() {
-            if let Some(cur) = strings.get(l, k) {
-                *v = cur.to_owned();
+            if let Some(cur) = changed(l, k) {
+                *v = cur;
             }
         }
         for k in &wanted {
-            if let Some(v) = strings.get(DEFAULT_LOCALE, k) {
+            if let Some(v) = changed(DEFAULT_LOCALE, k) {
                 if !h.entries.iter().any(|(ek, el, _)| ek == k && el == DEFAULT_LOCALE) {
-                    h.entries.push((k.clone(), DEFAULT_LOCALE.to_owned(), v.to_owned()));
+                    h.entries.push((k.clone(), DEFAULT_LOCALE.to_owned(), v));
                 }
             }
         }

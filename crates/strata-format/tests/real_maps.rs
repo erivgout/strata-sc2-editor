@@ -51,6 +51,9 @@ fn real_maps_roundtrip_and_edit() {
         assert!(doc.info.width > 0 && doc.info.height > 0);
         assert_eq!(doc.terrain.heights.len(), ((doc.info.width + 1) * (doc.info.height + 1)) as usize);
 
+        // 0. Our MapInfo integrity hash reproduces the editor's.
+        assert_hash_ok(&files);
+
         // 1. Untouched: byte-identical.
         let out = save_files(&doc).expect("save");
         assert!(changed(&files, &out).is_empty(), "lossless save changed {:?}", changed(&files, &out));
@@ -95,5 +98,22 @@ fn real_maps_roundtrip_and_edit() {
         assert!((re.terrain.heights[vi] - ed.terrain.heights[vi]).abs() < 0.01);
         assert_eq!(re.objects.objects, ed.objects.objects);
         assert_eq!(re.data, ed.data);
+
+        // 4. Changing the camera bounds keeps the integrity hash valid.
+        let mut ed = doc.clone();
+        ed.info.playable = [0, 0, ed.info.width, ed.info.height];
+        ed.dirty.info = true;
+        let out = save_files(&ed).expect("save bounds");
+        assert_hash_ok(&out);
+        assert_eq!(load_files(out).unwrap().info.playable, ed.info.playable);
+    }
+}
+
+fn assert_hash_ok(files: &FileMap) {
+    let Some(b) = files.get("MapInfo") else { return };
+    let f = strata_format::info::parse_mapinfo(b).expect("MapInfo parses");
+    if let (Some(hash), Some(flags)) = (f.hash, f.flags) {
+        let want = strata_format::info::integrity_hash(&f.tileset, f.width, f.height, f.bounds, flags);
+        assert_eq!(hash, want, "MapInfo integrity hash");
     }
 }

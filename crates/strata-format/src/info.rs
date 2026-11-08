@@ -9,19 +9,23 @@
 //! exactly. Observed on real maps:
 //!
 //! ```text
-//! "IpaM" u32 version  u32 u32(unknown)  u32 width  u32 height
+//! "IpaM" u32 version  u64 integrityHash (v>=0x18)  u32 width  u32 height
 //! u32 smallPreviewType [cstr if 2]  u32 largePreviewType [cstr if 2]
 //! cstr cstr (v>=0x1F, v>=0x26)  u32 u32  cstr fog ("Dark")  cstr tileset
 //! u32 left bottom right top (camera bounds)  u32 baseHeight (x4096)
 //! -- v39 --
 //! u32 loadScreenType  cstr loadScreenImage  lpstr  24 bytes
-//! cstr layout  lpstr lpstr  24 bytes flags  u8  u32 authorCount {cstr, 12 bytes}
+//! cstr layout  lpstr lpstr  u32 gameOptionFlags  20 bytes  u8  u32 authorCount {cstr, 12 bytes}
 //! lpstr loadingMusic
 //! u32 playerCount { u8 id, u32 control, i32 color(-1 = default), cstr race,
 //!                   u32 ?, u32 startPointObjectId, u32 aiFourCC, cstr decal }
 //! u32 n {u32}  u32 u32 n {bits}  u32 n {u32}  u32 n {u32}  u32 u32 n {bits}
 //! u32 lighting [+8 if 1|3, +4 if 2]  20 bytes
 //! ```
+//!
+//! The integrity hash is validated by the game: a wrong value makes it
+//! refuse the map ("Unable to open map"). See [`integrity_hash`]; it is
+//! recomputed whenever size, tileset or camera bounds change.
 //!
 //! Player names live in GameStrings as `MapInfo/PlayerNN/Name`, NN being the
 //! index in the player list (not the player id). Control values: 1 user,
@@ -114,6 +118,32 @@ pub struct MapInfoFile {
     /// Present only when the whole file decoded (version 39).
     pub players: Option<Vec<PlayerRec>>,
     pub players_range: Range<usize>,
+    /// Stored integrity hash (versions >= 0x18).
+    pub hash: Option<u64>,
+    /// Game-options flags whose popcount enters the hash (version 39 only).
+    pub flags: Option<u32>,
+}
+
+/// Version-independent part of the MapInfo integrity hash:
+/// `chars(description) + 7*height + 3*width + 2*(dx^2 + dy^2)`, where the
+/// "description" is the string right after the fog type (the tileset in
+/// every map seen) and dx/dy the camera-bounds size.
+fn hash_terms(description: &str, width: u32, height: u32, bounds: [u32; 4]) -> i64 {
+    let dx = bounds[2] as i64 - bounds[0] as i64;
+    let dy = bounds[3] as i64 - bounds[1] as i64;
+    description.chars().count() as i64 + 7 * height as i64 + 3 * width as i64 + 2 * (dx * dx + dy * dy)
+}
+
+/// The integrity hash the game recomputes when it opens a map (version
+/// 0x18 and later). A mismatch makes StarCraft II reject the map with
+/// "Unable to open map" before loading anything.
+///
+/// `hash = chars(description) + 7*height + 2*(dx^2 + dy^2) + 3*width - popcount(flags) - 17`
+///
+/// Formula from the sc2-arcade-watcher format notes; it reproduces the
+/// stored value of every editor-saved map we have (custom and ladder).
+pub fn integrity_hash(description: &str, width: u32, height: u32, bounds: [u32; 4], flags: u32) -> u64 {
+    (hash_terms(description, width, height, bounds) - flags.count_ones() as i64 - 17) as u64
 }
 
 pub fn parse_mapinfo(d: &[u8]) -> Result<MapInfoFile, FormatError> {
@@ -161,18 +191,21 @@ pub fn parse_mapinfo(d: &[u8]) -> Result<MapInfoFile, FormatError> {
         bounds_off,
         players: None,
         players_range: 0..0,
+        hash: (version >= 0x18).then(|| u64::from_le_bytes(d[8..16].try_into().expect("8 bytes"))),
+        flags: None,
     };
     if version == MAPINFO_V39 {
         r.u32()?; // base height
-        if let Ok((players, range)) = parse_v39_tail(&mut r) {
+        if let Ok((players, range, flags)) = parse_v39_tail(&mut r) {
             info.players = Some(players);
             info.players_range = range;
+            info.flags = Some(flags);
         }
     }
     Ok(info)
 }
 
-fn parse_v39_tail(r: &mut Reader) -> Result<(Vec<PlayerRec>, Range<usize>), FormatError> {
+fn parse_v39_tail(r: &mut Reader) -> Result<(Vec<PlayerRec>, Range<usize>, u32), FormatError> {
     r.u32()?;
     r.cstr()?;
     r.lpstr()?;
@@ -180,7 +213,8 @@ fn parse_v39_tail(r: &mut Reader) -> Result<(Vec<PlayerRec>, Range<usize>), Form
     r.cstr()?;
     r.lpstr()?;
     r.lpstr()?;
-    r.skip(24)?;
+    let flags = r.u32()?;
+    r.skip(20)?;
     r.skip(1)?;
     let authors = r.u32()?;
     if authors > 999 {
@@ -235,7 +269,7 @@ fn parse_v39_tail(r: &mut Reader) -> Result<(Vec<PlayerRec>, Range<usize>), Form
     if r.pos != r.data.len() {
         return Err(r.err("trailing bytes"));
     }
-    Ok((players, start..end))
+    Ok((players, start..end, flags))
 }
 
 fn write_players(o: &mut Vec<u8>, recs: &[PlayerRec]) {
@@ -249,6 +283,13 @@ fn write_players(o: &mut Vec<u8>, recs: &[PlayerRec]) {
 pub fn patch_mapinfo(orig: &[u8], f: &MapInfoFile, info: &strata_core::MapInfo, recs: Option<&[PlayerRec]>) -> Vec<u8> {
     let mut o = Vec::with_capacity(orig.len() + 64);
     o.extend_from_slice(&orig[..f.size_off]);
+    if let Some(old) = f.hash {
+        // The flags term is unchanged, so shift the stored hash by the change
+        // in the other terms (works for every hashed version).
+        let delta = hash_terms(&info.tileset, info.width, info.height, info.playable)
+            - hash_terms(&f.tileset, f.width, f.height, f.bounds);
+        o[8..16].copy_from_slice(&(old as i64).wrapping_add(delta).to_le_bytes());
+    }
     o.put_u32(info.width);
     o.put_u32(info.height);
     o.extend_from_slice(&orig[f.size_off + 8..f.tileset_range.start]);
@@ -273,8 +314,8 @@ pub fn new_mapinfo(info: &strata_core::MapInfo, recs: &[PlayerRec]) -> Vec<u8> {
     let mut o = Vec::with_capacity(512);
     o.extend_from_slice(b"IpaM");
     o.put_u32(MAPINFO_V39);
-    o.put_u32(0x0003_533B); // observed in editor-created maps; meaning unknown
-    o.put_u32(0);
+    const FLAGS: u32 = 0x4000; // game-options flags of an editor-created map
+    o.extend_from_slice(&integrity_hash(&info.tileset, info.width, info.height, info.playable, FLAGS).to_le_bytes());
     o.put_u32(info.width);
     o.put_u32(info.height);
     o.put_u32(1);
@@ -298,7 +339,7 @@ pub fn new_mapinfo(info: &strata_core::MapInfo, recs: &[PlayerRec]) -> Vec<u8> {
     o.put_cstr("");
     o.put_lpstr("");
     o.put_lpstr("");
-    for v in [0x4000u32, 1, 2, 0x2000, 0, 0] {
+    for v in [FLAGS, 1, 2, 0x2000, 0, 0] {
         o.put_u32(v);
     }
     o.push(0x10);
@@ -588,6 +629,42 @@ mod tests {
         let info0 = strata_core::MapInfo::new("T", 64, 64);
         let same = patch_mapinfo(&orig, &f, &info0, Some(f.players.as_ref().unwrap()));
         assert_eq!(same, orig);
+    }
+
+    #[test]
+    fn integrity_hash_matches_editor_maps() {
+        // Stored hashes of real editor-saved maps (tileset, size, camera bounds, option flags).
+        assert_eq!(integrity_hash("BlackopsLab_A", 256, 256, [10, 8, 246, 236], 0x4000), 0x3533B);
+        assert_eq!(integrity_hash("Zerus", 256, 256, [10, 8, 246, 236], 0x6000), 0x35332);
+        assert_eq!(integrity_hash("Shakuras", 256, 256, [10, 8, 246, 236], 0x4000), 0x35336);
+        assert_eq!(integrity_hash("Agria", 256, 256, [0, 0, 256, 256], 0x0003_8060), 0x409EF);
+        assert_eq!(integrity_hash("Elsecaro", 152, 176, [9, 13, 143, 155], 0x4000), 0x1305E);
+    }
+
+    #[test]
+    fn new_and_patched_mapinfo_carry_a_valid_hash() {
+        // Regression: new maps used to carry a hash copied from a 256x256
+        // editor map, so every other size/tileset/bounds was rejected by the game.
+        let mut info = strata_core::MapInfo::new("T", 64, 64);
+        info.tileset = "Char".into();
+        let recs = recs_from_players(&new_recs(&info.players), &[]);
+        let bytes = new_mapinfo(&info, &recs);
+        let f = parse_mapinfo(&bytes).unwrap();
+        let check = |f: &MapInfoFile| integrity_hash(&f.tileset, f.width, f.height, f.bounds, f.flags.unwrap());
+        assert_eq!(f.hash, Some(check(&f)));
+        assert_eq!(&bytes[8..16], &check(&f).to_le_bytes());
+        info.playable = [0, 0, 64, 64];
+        info.tileset = "BlackopsLab_A".into();
+        let out = patch_mapinfo(&bytes, &f, &info, None);
+        let g = parse_mapinfo(&out).unwrap();
+        assert_eq!(g.bounds, [0, 0, 64, 64]);
+        assert_eq!(g.hash, Some(check(&g)));
+        // The editor's own blank 256x256 map starts with exactly these 16 bytes.
+        let mut e = strata_core::MapInfo::new("T", 256, 256);
+        e.tileset = "BlackopsLab_A".into();
+        e.playable = [10, 8, 246, 236];
+        let editor: [u8; 16] = [b'I', b'p', b'a', b'M', 0x27, 0, 0, 0, 0x3B, 0x53, 0x03, 0, 0, 0, 0, 0];
+        assert_eq!(new_mapinfo(&e, &recs)[..16], editor);
     }
 
     #[test]
