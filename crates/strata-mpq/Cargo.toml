@@ -4,6 +4,12 @@ description = "Pure-Rust MPQ archive reader/writer (wasm-compatible) for StarCra
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
 
 [dependencies]
+crc32fast = "1.5.4"
+libbz2-rs-sys = { version = "0.2.6", default-features = false, features = ["rust-allocator"] }
+lzma-rs = "0.3.0"
+md-5 = { version = "0.10", default-features = false }
+miniz_oxide = "0.8"
 thiserror.workspace = true
