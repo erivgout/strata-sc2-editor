@@ -10,7 +10,7 @@ use strata_core::MapDocument;
 use crate::commands::{self, Command, CommandPalette, ShortcutsOverlay};
 use crate::io::{Io, IoEvent, SaveError};
 use crate::panels::{Tab, Viewer};
-use crate::state::{AppAction, EditorState, Mode, ToastKind};
+use crate::state::{AppAction, EditorState, Mode, ToastKind, Workspace};
 use crate::theme::{self, ThemePref, Tokens};
 
 const SETTINGS_KEY: &str = "strata.settings.v1";
@@ -22,7 +22,14 @@ const MAX_RECENT_COMMANDS: usize = 8;
 #[serde(default)]
 pub struct Settings {
     pub theme: ThemePref,
-    pub dock: DockState<Tab>,
+    /// The workspace shown when Strata starts.
+    pub workspace: Workspace,
+    /// One dock layout per workspace.
+    pub docks: WorkspaceDocks,
+    /// The single layout saved before workspaces existed; it becomes the Map
+    /// workspace's layout when loaded (see [`Settings::migrate`]).
+    #[serde(rename = "dock", skip_serializing, deserialize_with = "present")]
+    legacy_dock: Option<DockState<Tab>>,
     /// Recently opened files, newest first (native paths).
     pub recent: Vec<String>,
     /// Recently run palette commands, newest first.
@@ -34,7 +41,9 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             theme: ThemePref::Dark,
-            dock: default_dock(),
+            workspace: Workspace::Map,
+            docks: WorkspaceDocks::default(),
+            legacy_dock: None,
             recent: Vec::new(),
             recent_commands: Vec::new(),
             show_welcome: true,
@@ -42,25 +51,138 @@ impl Default for Settings {
     }
 }
 
-pub fn default_dock() -> DockState<Tab> {
-    let mut dock = DockState::new(vec![Tab::Viewport]);
+impl Settings {
+    /// Bring settings saved by older versions up to date.
+    fn migrate(mut self) -> Self {
+        if let Some(dock) = self.legacy_dock.take() {
+            self.docks.map = dock;
+        }
+        self
+    }
+
+    pub fn dock(&self) -> &DockState<Tab> {
+        self.docks.get(self.workspace)
+    }
+
+    /// Show a workspace. Its main panel is reopened if it was closed, since
+    /// a Triggers workspace without the trigger editor is no use.
+    pub fn switch_workspace(&mut self, ws: Workspace) {
+        self.workspace = ws;
+        let main = ws.main_tab();
+        if self.dock().find_tab(&main).is_none() {
+            reveal_tab(self.dock_mut(), main);
+        }
+    }
+
+    /// Bring a panel into view: in the current workspace if it is there,
+    /// else in the workspace it belongs to, else open it here.
+    pub fn focus_tab(&mut self, tab: Tab) {
+        if self.dock().find_tab(&tab).is_none() {
+            if let Some(home) = Workspace::home_of(tab) {
+                self.workspace = home;
+            }
+        }
+        reveal_tab(self.dock_mut(), tab);
+    }
+
+    pub fn dock_mut(&mut self) -> &mut DockState<Tab> {
+        self.docks.get_mut(self.workspace)
+    }
+}
+
+/// Read a field that was saved as a plain value into an `Option` (RON
+/// writes options as `Some(..)`, so the default `Option` impl would reject it).
+fn present<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    T::deserialize(d).map(Some)
+}
+
+/// The dock layouts of the four workspaces.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct WorkspaceDocks {
+    pub map: DockState<Tab>,
+    pub triggers: DockState<Tab>,
+    pub data: DockState<Tab>,
+    pub text: DockState<Tab>,
+}
+
+impl Default for WorkspaceDocks {
+    fn default() -> Self {
+        Self {
+            map: default_dock(Workspace::Map),
+            triggers: default_dock(Workspace::Triggers),
+            data: default_dock(Workspace::Data),
+            text: default_dock(Workspace::Text),
+        }
+    }
+}
+
+impl WorkspaceDocks {
+    pub fn get(&self, ws: Workspace) -> &DockState<Tab> {
+        match ws {
+            Workspace::Map => &self.map,
+            Workspace::Triggers => &self.triggers,
+            Workspace::Data => &self.data,
+            Workspace::Text => &self.text,
+        }
+    }
+
+    pub fn get_mut(&mut self, ws: Workspace) -> &mut DockState<Tab> {
+        match ws {
+            Workspace::Map => &mut self.map,
+            Workspace::Triggers => &mut self.triggers,
+            Workspace::Data => &mut self.data,
+            Workspace::Text => &mut self.text,
+        }
+    }
+}
+
+/// The layout a workspace starts with (and returns to on "Reset layout").
+pub fn default_dock(ws: Workspace) -> DockState<Tab> {
+    let mut dock = DockState::new(vec![ws.main_tab()]);
     let surface = dock.main_surface_mut();
-    let [main, right] =
-        surface.split_right(NodeIndex::root(), 0.77, vec![Tab::Inspector, Tab::MapProps]);
-    surface.split_below(right, 0.64, vec![Tab::Minimap]);
-    surface.split_below(
-        main,
-        0.68,
-        vec![
-            Tab::Triggers,
-            Tab::Data,
-            Tab::Strings,
-            Tab::Script,
-            Tab::Problems,
-            Tab::History,
-            Tab::Mcp,
-        ],
-    );
+    let root = NodeIndex::root();
+    match ws {
+        // The map is the hero; the editors stay one click away below it.
+        Workspace::Map => {
+            let [main, right] =
+                surface.split_right(root, 0.77, vec![Tab::Inspector, Tab::MapProps]);
+            surface.split_below(right, 0.64, vec![Tab::Minimap]);
+            surface.split_below(
+                main,
+                0.68,
+                vec![
+                    Tab::Problems,
+                    Tab::History,
+                    Tab::Mcp,
+                    Tab::Script,
+                    Tab::Triggers,
+                    Tab::Data,
+                    Tab::Strings,
+                ],
+            );
+        }
+        // Triggers fill the window; the generated script and problems sit
+        // beside them so codegen errors are visible while editing.
+        Workspace::Triggers => {
+            let [_, right] = surface.split_right(root, 0.70, vec![Tab::Script]);
+            surface.split_below(right, 0.62, vec![Tab::Problems, Tab::History]);
+        }
+        Workspace::Data => {
+            surface.split_below(root, 0.70, vec![Tab::Strings, Tab::Problems, Tab::History]);
+        }
+        Workspace::Text => {
+            surface.split_below(root, 0.76, vec![Tab::Problems, Tab::History]);
+        }
+    }
+    // The main panel starts focused so its tab label takes the accent.
+    if let Some(path) = dock.find_tab(&ws.main_tab()) {
+        dock.set_focused_node_and_surface(path.node_path());
+    }
     dock
 }
 
@@ -189,7 +311,8 @@ impl StrataApp {
         theme::install_fonts(&cc.egui_ctx);
         let settings: Settings = cc
             .storage
-            .and_then(|s| eframe::get_value(s, SETTINGS_KEY))
+            .and_then(|s| eframe::get_value::<Settings>(s, SETTINGS_KEY))
+            .map(Settings::migrate)
             .unwrap_or_default();
         let mut app = Self {
             state: EditorState::new(MapDocument::new("Untitled map", 128, 128)),
@@ -306,9 +429,15 @@ impl StrataApp {
             Command::OpenPalette => self.palette.toggle(),
             Command::ShowShortcuts => self.shortcuts.open = !self.shortcuts.open,
             Command::SetMode(m) => self.state.mode = m,
+            Command::Workspace(w) => self.switch_workspace(w),
             Command::FocusTab(t) => self.focus_tab(t),
             Command::Theme(p) => self.settings.theme = p,
-            Command::ResetLayout => self.settings.dock = default_dock(),
+            Command::ResetLayout => {
+                let ws = self.settings.workspace;
+                *self.settings.dock_mut() = default_dock(ws);
+                self.state
+                    .toast(ToastKind::Info, format!("Reset the {} layout", ws.label()));
+            }
             Command::ConnectAi => self.focus_tab(Tab::Mcp),
             Command::FrameMap => {
                 let center = self.state.doc.world_size() * 0.5;
@@ -335,24 +464,12 @@ impl StrataApp {
         }
     }
 
+    fn switch_workspace(&mut self, ws: Workspace) {
+        self.settings.switch_workspace(ws);
+    }
+
     fn focus_tab(&mut self, tab: Tab) {
-        let dock = &mut self.settings.dock;
-        if let Some(found) = dock.find_tab(&tab) {
-            let _ = dock.set_active_tab(found);
-            dock.set_focused_node_and_surface(found.node_path());
-            return;
-        }
-        // Closed: reopen it next to its usual neighbours.
-        let neighbour = match tab {
-            Tab::Inspector | Tab::MapProps | Tab::Minimap => {
-                [Tab::Inspector, Tab::MapProps, Tab::Minimap]
-            }
-            _ => [Tab::Triggers, Tab::Problems, Tab::History],
-        };
-        if let Some(found) = neighbour.iter().find_map(|n| dock.find_tab(n)) {
-            dock.set_focused_node_and_surface(found.node_path());
-        }
-        dock.push_to_focused_leaf(tab);
+        self.settings.focus_tab(tab);
     }
 
     fn problem_counts(&mut self) -> (usize, usize) {
@@ -612,6 +729,30 @@ impl StrataApp {
                 self.menu_cmd(ui, Command::OpenPalette);
             });
             ui.menu_button("View", |ui| {
+                ui.label(RichText::new("Workspace").small().color(t.text_dim));
+                for w in Workspace::ALL {
+                    let label = if w == self.settings.workspace {
+                        RichText::new(w.label()).color(t.accent_text)
+                    } else {
+                        RichText::new(w.label())
+                    };
+                    let cmd = Command::Workspace(w);
+                    let mut b = egui::Button::new(label);
+                    if let Some(s) = cmd.shortcut() {
+                        b = b.shortcut_text(ui.ctx().format_shortcut(&s));
+                    }
+                    if ui.add(b).clicked() {
+                        self.queued.push(cmd);
+                    }
+                }
+                let ws = self.settings.workspace;
+                self.menu_cmd_labeled(
+                    ui,
+                    format!("Reset {} layout", ws.label()),
+                    Command::ResetLayout,
+                    true,
+                );
+                ui.separator();
                 ui.menu_button("Modes", |ui| {
                     for m in Mode::ALL {
                         self.menu_cmd(ui, Command::SetMode(m));
@@ -629,8 +770,6 @@ impl StrataApp {
                         self.queued.push(Command::Theme(p));
                     }
                 }
-                ui.separator();
-                self.menu_cmd(ui, Command::ResetLayout);
             });
             ui.menu_button("Map", |ui| {
                 self.menu_cmd_labeled(
@@ -657,62 +796,165 @@ impl StrataApp {
             .rect
         });
 
-        // Command palette affordance, centered on the bar.
+        // Workspace switcher and command palette affordance. The search box
+        // is centered on the bar when there is room, the switcher sits just
+        // left of it; on narrow windows both slide right of the menus and
+        // the search box shrinks, then hides.
         let menus = menus.inner;
-        let w = 300.0_f32.min(bar.width() - (menus.right() - bar.left()) * 2.0 - 16.0);
-        {
-            if w > 160.0 {
-                let rect = Rect::from_center_size(
-                    Pos2::new(bar.center().x, menus.center().y),
-                    Vec2::new(w, 24.0),
-                );
-                let id = ui.id().with("palette-hint");
-                let resp = ui.interact(rect, id, egui::Sense::click());
-                let hovered = resp.hovered();
-                let p = ui.painter();
-                let dark = ui.visuals().dark_mode;
-                p.rect(
-                    rect,
-                    6.0,
-                    if hovered {
-                        theme::hover_fill(&t, dark)
-                    } else {
-                        t.bg_deep
-                    },
-                    Stroke::new(1.0, t.stroke),
-                    egui::StrokeKind::Inside,
-                );
-                commands::paint_search_icon(
-                    p,
-                    Pos2::new(rect.left() + 16.0, rect.center().y),
-                    t.text_dim,
-                );
-                p.text(
-                    Pos2::new(rect.left() + 30.0, rect.center().y),
-                    egui::Align2::LEFT_CENTER,
-                    "Search commands…",
-                    egui::FontId::proportional(14.0),
-                    t.text_dim,
-                );
-                let keys = ui
-                    .ctx()
-                    .format_shortcut(&Command::OpenPalette.shortcut().unwrap_or(
-                        egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::K),
-                    ));
-                p.text(
-                    Pos2::new(rect.right() - 10.0, rect.center().y),
-                    egui::Align2::RIGHT_CENTER,
-                    keys,
-                    egui::FontId::proportional(12.0),
-                    t.text_dim,
-                );
-                if resp
-                    .on_hover_cursor(egui::CursorIcon::PointingHand)
-                    .clicked()
-                {
-                    self.queued.push(Command::OpenPalette);
-                }
+        let y = menus.center().y;
+        let seg_w = workspace_switcher_width(ui);
+        let gap = 8.0;
+        let left = menus.right() + 16.0;
+        let right = bar.right() - 4.0;
+        if seg_w > right - left {
+            return;
+        }
+        let search_w = 300.0_f32.min(right - left - seg_w - gap);
+        let show_search = search_w >= 160.0;
+        let group_w = seg_w + if show_search { gap + search_w } else { 0.0 };
+        let preferred = if show_search {
+            bar.center().x - search_w / 2.0 - gap - seg_w
+        } else {
+            bar.center().x - seg_w / 2.0
+        };
+        let x0 = preferred.max(left).min(right - group_w);
+        let seg_rect = Rect::from_min_size(Pos2::new(x0, y - 12.0), Vec2::new(seg_w, 24.0));
+        self.workspace_switcher(ui, seg_rect, &t);
+        if show_search {
+            let rect = Rect::from_min_size(
+                Pos2::new(seg_rect.right() + gap, y - 12.0),
+                Vec2::new(search_w, 24.0),
+            );
+            self.palette_hint(ui, rect, &t);
+        }
+    }
+
+    /// A segmented control: one segment per workspace, the active one in
+    /// the accent.
+    fn workspace_switcher(&mut self, ui: &mut egui::Ui, rect: Rect, t: &Tokens) {
+        let dark = ui.visuals().dark_mode;
+        ui.painter().rect(
+            rect,
+            6.0,
+            t.bg_deep,
+            Stroke::new(1.0, t.stroke),
+            egui::StrokeKind::Inside,
+        );
+        let n = Workspace::ALL.len() as f32;
+        let w = (rect.width() - 4.0) / n;
+        for (i, ws) in Workspace::ALL.into_iter().enumerate() {
+            let r = Rect::from_min_size(
+                Pos2::new(rect.left() + 2.0 + i as f32 * w, rect.top() + 2.0),
+                Vec2::new(w, rect.height() - 4.0),
+            );
+            let resp = ui.interact(r, ui.id().with(("workspace", ws)), egui::Sense::click());
+            let active = self.settings.workspace == ws;
+            resp.widget_info(|| {
+                egui::WidgetInfo::selected(
+                    egui::WidgetType::SelectableLabel,
+                    true,
+                    active,
+                    format!("{} workspace", ws.label()),
+                )
+            });
+            let p = ui.painter();
+            let (fill, color) = if active {
+                (theme::selection_fill(t, dark), t.accent_text)
+            } else if resp.hovered() {
+                (theme::hover_fill(t, dark), t.text)
+            } else {
+                (Color32::TRANSPARENT, t.text_dim)
+            };
+            p.rect_filled(r, 4.0, fill);
+            if resp.has_focus() {
+                p.rect_stroke(r, 4.0, Stroke::new(1.5, t.accent), egui::StrokeKind::Inside);
             }
+            p.text(
+                r.center(),
+                egui::Align2::CENTER_CENTER,
+                ws.label(),
+                egui::FontId::new(14.0, theme::medium()),
+                color,
+            );
+            let cmd = Command::Workspace(ws);
+            let keys = cmd.shortcut().map(|s| ui.ctx().format_shortcut(&s));
+            let resp = resp
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .on_hover_ui(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(cmd.label()).family(theme::medium()));
+                        if let Some(k) = &keys {
+                            commands::keycap(ui, k, t);
+                        }
+                    });
+                });
+            if resp.clicked() {
+                self.queued.push(cmd);
+            }
+        }
+    }
+
+    fn palette_hint(&mut self, ui: &mut egui::Ui, rect: Rect, t: &Tokens) {
+        let resp = ui.interact(rect, ui.id().with("palette-hint"), egui::Sense::click());
+        let p = ui.painter();
+        let dark = ui.visuals().dark_mode;
+        let fill = if resp.hovered() {
+            theme::hover_fill(t, dark)
+        } else {
+            t.bg_deep
+        };
+        p.rect(
+            rect,
+            6.0,
+            fill,
+            Stroke::new(1.0, t.stroke),
+            egui::StrokeKind::Inside,
+        );
+        if resp.has_focus() {
+            p.rect_stroke(
+                rect,
+                6.0,
+                Stroke::new(1.5, t.accent),
+                egui::StrokeKind::Inside,
+            );
+        }
+        commands::paint_search_icon(
+            p,
+            Pos2::new(rect.left() + 16.0, rect.center().y),
+            t.text_dim,
+        );
+        let keys = ui
+            .ctx()
+            .format_shortcut(&Command::OpenPalette.shortcut().unwrap_or(
+                egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::K),
+            ));
+        let keys = p.layout_no_wrap(keys, egui::FontId::proportional(12.0), t.text_dim);
+        let keys_left = rect.right() - 10.0 - keys.size().x;
+        p.galley(
+            Pos2::new(keys_left, rect.center().y - keys.size().y / 2.0),
+            keys,
+            t.text_dim,
+        );
+        let hint = p.layout(
+            "Search commands…".to_owned(),
+            egui::FontId::proportional(14.0),
+            t.text_dim,
+            f32::INFINITY,
+        );
+        let text_left = rect.left() + 30.0;
+        if text_left + hint.size().x < keys_left - 8.0 {
+            p.galley(
+                Pos2::new(text_left, rect.center().y - hint.size().y / 2.0),
+                hint,
+                t.text_dim,
+            );
+        }
+        let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+        resp.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Search commands")
+        });
+        if resp.clicked() {
+            self.queued.push(Command::OpenPalette);
         }
     }
 
@@ -781,9 +1023,13 @@ impl StrataApp {
         });
     }
 
+    /// One line: document facts on the left; cursor, mode and frame rate on
+    /// the right. Nothing wraps; long text is cut with an ellipsis.
     fn status_bar(&mut self, ui: &mut egui::Ui) {
         let t = theme::tokens(ui.ctx());
         let (errors, warnings) = self.problem_counts();
+        let map_visible = self.settings.dock().find_tab(&Tab::Viewport).is_some();
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
         ui.horizontal_centered(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
             let modified = self.state.history.is_modified();
@@ -792,10 +1038,20 @@ impl StrataApp {
                 .file_name
                 .clone()
                 .unwrap_or_else(|| self.state.doc.info.name.clone());
-            ui.label(RichText::new(name).family(theme::medium()).color(t.text));
+            let name_w = (ui.available_width() * 0.3).max(80.0);
+            ui.allocate_ui(Vec2::new(name_w, ui.available_height()), |ui| {
+                ui.add(egui::Label::new(
+                    RichText::new(name).family(theme::medium()).color(t.text),
+                ))
+                .on_hover_text(self.state.title());
+            });
             if modified {
-                ui.label(RichText::new("• Unsaved").small().color(t.text_dim))
+                dot(ui, &t);
+                ui.label(RichText::new("Unsaved changes").small().color(t.text))
                     .on_hover_text("Changes are autosaved every 30 seconds until you save.");
+            } else if self.state.file_name.is_some() {
+                dot(ui, &t);
+                ui.label(RichText::new("Saved").small().color(t.text_dim));
             }
             dot(ui, &t);
             let i = &self.state.doc.info;
@@ -803,7 +1059,8 @@ impl StrataApp {
                 RichText::new(format!("{} × {}", i.width, i.height))
                     .small()
                     .color(t.text_dim),
-            );
+            )
+            .on_hover_text("Map size in cells");
             dot(ui, &t);
             let (text, color) = match (errors, warnings) {
                 (0, 0) => ("No problems".to_owned(), t.text_dim),
@@ -834,24 +1091,33 @@ impl StrataApp {
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
+                // A fixed slot so the labels to its left don't jitter as the
+                // number changes or disappears while idle.
                 let dt = ui.input(|i| i.stable_dt);
-                if dt > 0.0 && dt < 0.05 {
-                    ui.label(
-                        RichText::new(format!("{:.0} fps", 1.0 / dt))
-                            .small()
-                            .color(t.text_dim),
-                    );
-                    dot(ui, &t);
+                let fps = (dt > 0.0 && dt < 0.05).then(|| format!("{:.0} fps", 1.0 / dt));
+                ui.allocate_ui_with_layout(
+                    Vec2::new(46.0, ui.available_height()),
+                    egui::Layout::right_to_left(egui::Align::Center),
+                    |ui| {
+                        ui.set_min_width(46.0);
+                        if let Some(fps) = fps {
+                            ui.label(RichText::new(fps).small().color(t.text_dim));
+                        }
+                    },
+                );
+                if !map_visible {
+                    return;
                 }
+                dot(ui, &t);
                 ui.label(
                     RichText::new(format!("{} mode", self.state.mode.label()))
                         .small()
-                        .color(t.text_dim),
+                        .color(t.text),
                 );
                 let s = crate::panels::viewport::status_text(&self.state);
-                if !s.is_empty() {
+                if !s.is_empty() && ui.available_width() > 60.0 {
                     dot(ui, &t);
-                    ui.label(RichText::new(s).small().color(t.text_dim));
+                    ui.add(egui::Label::new(RichText::new(s).small().color(t.text_dim)).truncate());
                 }
             });
         });
@@ -1280,23 +1546,37 @@ impl eframe::App for StrataApp {
             .frame(bar(t.bg_panel).inner_margin(egui::Margin::symmetric(12, 3)))
             .exact_size(26.0)
             .show(ui, |ui| self.status_bar(ui));
-        egui::Panel::left("modes")
-            .resizable(false)
-            .exact_size(52.0)
-            .frame(
-                egui::Frame::new()
-                    .fill(t.bg_panel)
-                    .inner_margin(egui::Margin::symmetric(6, 4)),
-            )
-            .show(ui, |ui| self.mode_rail(ui));
+        // Modes act on the map, so the rail only shows where the map does.
+        if self.settings.dock().find_tab(&Tab::Viewport).is_some() {
+            egui::Panel::left("modes")
+                .resizable(false)
+                .exact_size(52.0)
+                .frame(
+                    egui::Frame::new()
+                        .fill(t.bg_panel)
+                        .inner_margin(egui::Margin::symmetric(6, 4)),
+                )
+                .show(ui, |ui| self.mode_rail(ui));
+        }
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(t.bg_deep))
             .show(ui, |ui| {
+                let ws = self.settings.workspace;
+                if !has_tabs(self.settings.dock()) {
+                    if empty_workspace(ui, ws, &t) {
+                        self.queued.push(Command::ResetLayout);
+                    }
+                    return;
+                }
+                // Only the active workspace's dock is drawn, so a panel that
+                // appears in several workspaces (the map, Problems) is never
+                // shown twice in one frame.
                 let style = theme::dock_style(ui.style());
                 let mut viewer = Viewer {
                     state: &mut self.state,
                 };
-                DockArea::new(&mut self.settings.dock)
+                DockArea::new(self.settings.docks.get_mut(ws))
+                    .id(egui::Id::new(("strata-dock", ws)))
                     .style(style)
                     .show_leaf_collapse_buttons(false)
                     .show_leaf_close_all_buttons(false)
@@ -1351,6 +1631,73 @@ impl eframe::App for StrataApp {
 
 fn plural(n: usize, word: &str) -> String {
     format!("{n} {word}{}", if n == 1 { "" } else { "s" })
+}
+
+/// Focus `tab` in `dock`, reopening it next to its usual neighbours if it
+/// was closed.
+fn reveal_tab(dock: &mut DockState<Tab>, tab: Tab) {
+    if let Some(found) = dock.find_tab(&tab) {
+        let _ = dock.set_active_tab(found);
+        dock.set_focused_node_and_surface(found.node_path());
+        return;
+    }
+    let neighbours: &[Tab] = match tab {
+        Tab::Inspector | Tab::MapProps | Tab::Minimap => {
+            &[Tab::Inspector, Tab::MapProps, Tab::Minimap]
+        }
+        Tab::Viewport | Tab::Triggers | Tab::Data | Tab::Strings => {
+            &[Tab::Viewport, Tab::Triggers, Tab::Data, Tab::Strings]
+        }
+        Tab::Script | Tab::Problems | Tab::History | Tab::Mcp => {
+            &[Tab::Problems, Tab::History, Tab::Mcp, Tab::Script]
+        }
+    };
+    if let Some(found) = neighbours.iter().find_map(|n| dock.find_tab(n)) {
+        dock.set_focused_node_and_surface(found.node_path());
+    }
+    dock.push_to_focused_leaf(tab);
+}
+
+/// Width of the workspace switcher: equal segments sized to the longest label.
+fn workspace_switcher_width(ui: &egui::Ui) -> f32 {
+    let font = egui::FontId::new(14.0, theme::medium());
+    let widest = Workspace::ALL
+        .iter()
+        .map(|w| {
+            ui.painter()
+                .layout_no_wrap(w.label().to_owned(), font.clone(), Color32::WHITE)
+                .size()
+                .x
+        })
+        .fold(0.0, f32::max);
+    (widest + 28.0).round() * Workspace::ALL.len() as f32 + 4.0
+}
+
+/// Shown when every panel of a workspace was closed. Returns true when the
+/// user asks for the default layout back.
+fn empty_workspace(ui: &mut egui::Ui, ws: Workspace, t: &Tokens) -> bool {
+    let mut reset = false;
+    ui.vertical_centered(|ui| {
+        ui.add_space((ui.available_height() * 0.3).max(24.0));
+        ui.label(
+            RichText::new(format!("The {} workspace has no panels open.", ws.label()))
+                .size(16.0)
+                .color(t.text),
+        );
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new("Bring back its default panels, or open one from View › Panels.")
+                .color(t.text_dim),
+        );
+        ui.add_space(12.0);
+        reset = primary_button(ui, &format!("Reset {} layout", ws.label()), true, t).clicked();
+    });
+    reset
+}
+
+/// Whether a dock shows any panel at all.
+fn has_tabs(dock: &DockState<Tab>) -> bool {
+    dock.iter_all_tabs().next().is_some()
 }
 
 fn dot(ui: &mut egui::Ui, t: &Tokens) {
@@ -1623,5 +1970,129 @@ fn dashed_rect(p: &egui::Painter, r: Rect, color: Color32) {
     ];
     for (a, b) in edges {
         p.extend(egui::Shape::dashed_line(&[a, b], s, 2.5, 2.0));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tabs(dock: &DockState<Tab>) -> Vec<Tab> {
+        dock.iter_all_tabs().map(|(_, t)| *t).collect()
+    }
+
+    #[test]
+    fn settings_from_before_workspaces_load_cleanly() {
+        let mut old_dock = DockState::new(vec![Tab::Viewport]);
+        old_dock
+            .main_surface_mut()
+            .split_right(NodeIndex::root(), 0.5, vec![Tab::History]);
+        // The settings shape saved before workspaces existed.
+        #[derive(serde::Serialize)]
+        struct OldSettings {
+            theme: ThemePref,
+            dock: DockState<Tab>,
+            recent: Vec<String>,
+            recent_commands: Vec<Command>,
+            show_welcome: bool,
+        }
+        let mut storage = MemoryStorage::default();
+        let old = OldSettings {
+            theme: ThemePref::Light,
+            dock: old_dock,
+            recent: vec!["C:/maps/A.SC2Map".into()],
+            recent_commands: vec![Command::ResetLayout, Command::Save],
+            show_welcome: false,
+        };
+        eframe::set_value(&mut storage, SETTINGS_KEY, &old);
+
+        let s = eframe::get_value::<Settings>(&storage, SETTINGS_KEY)
+            .expect("old settings load")
+            .migrate();
+        assert_eq!(s.theme, ThemePref::Light);
+        assert!(!s.show_welcome);
+        assert_eq!(s.workspace, Workspace::Map);
+        assert_eq!(tabs(&s.docks.map), vec![Tab::Viewport, Tab::History]);
+        assert!(s.docks.triggers.find_tab(&Tab::Triggers).is_some());
+        assert_eq!(s.recent_commands, vec![Command::ResetLayout, Command::Save]);
+
+        // Saved again, the old field is gone and the layout survives.
+        let mut s = s;
+        s.workspace = Workspace::Data;
+        eframe::set_value(&mut storage, SETTINGS_KEY, &s);
+        assert!(!storage.0.get(SETTINGS_KEY).unwrap().contains("dock:"));
+        let again = eframe::get_value::<Settings>(&storage, SETTINGS_KEY)
+            .expect("new settings load")
+            .migrate();
+        assert_eq!(again.workspace, Workspace::Data);
+        assert_eq!(tabs(&again.docks.map), vec![Tab::Viewport, Tab::History]);
+    }
+
+    #[derive(Default)]
+    struct MemoryStorage(std::collections::HashMap<String, String>);
+
+    impl eframe::Storage for MemoryStorage {
+        fn get_string(&self, key: &str) -> Option<String> {
+            self.0.get(key).cloned()
+        }
+        fn set_string(&mut self, key: &str, value: String) {
+            self.0.insert(key.to_owned(), value);
+        }
+        fn remove_string(&mut self, key: &str) {
+            self.0.remove(key);
+        }
+        fn flush(&mut self) {}
+    }
+
+    #[test]
+    fn every_workspace_starts_with_its_main_panel() {
+        for ws in Workspace::ALL {
+            let dock = default_dock(ws);
+            assert!(dock.find_tab(&ws.main_tab()).is_some(), "{ws:?}");
+            let all = tabs(&dock);
+            let mut unique = all.clone();
+            unique.sort_by_key(|t| *t as u8);
+            unique.dedup();
+            assert_eq!(all.len(), unique.len(), "{ws:?} lists a panel twice");
+        }
+        // The map workspace keeps every editor reachable.
+        let map = tabs(&default_dock(Workspace::Map));
+        for t in [Tab::Triggers, Tab::Data, Tab::Strings, Tab::Script] {
+            assert!(map.contains(&t));
+        }
+    }
+
+    #[test]
+    fn focus_tab_prefers_the_current_workspace_then_the_tabs_home() {
+        let mut s = Settings::default();
+        // Triggers are in the Map workspace's bottom strip: stay here.
+        s.focus_tab(Tab::Triggers);
+        assert_eq!(s.workspace, Workspace::Map);
+
+        // Data is not in the Text workspace: go to the Data workspace.
+        s.workspace = Workspace::Text;
+        s.focus_tab(Tab::Data);
+        assert_eq!(s.workspace, Workspace::Data);
+
+        // The map lives in the Map workspace.
+        s.focus_tab(Tab::Viewport);
+        assert_eq!(s.workspace, Workspace::Map);
+
+        // A panel with no home opens in the current workspace.
+        s.workspace = Workspace::Triggers;
+        assert!(s.dock().find_tab(&Tab::Mcp).is_none());
+        s.focus_tab(Tab::Mcp);
+        assert_eq!(s.workspace, Workspace::Triggers);
+        assert!(s.dock().find_tab(&Tab::Mcp).is_some());
+    }
+
+    #[test]
+    fn switching_reopens_a_closed_main_panel() {
+        let mut s = Settings::default();
+        let path = s.docks.triggers.find_tab(&Tab::Triggers).unwrap();
+        s.docks.triggers.remove_tab(path);
+        assert!(s.docks.triggers.find_tab(&Tab::Triggers).is_none());
+        s.switch_workspace(Workspace::Triggers);
+        assert!(s.dock().find_tab(&Tab::Triggers).is_some());
     }
 }

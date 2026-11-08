@@ -794,12 +794,12 @@ fn empty_catalog(ui: &mut Ui, cx: &mut Cx) {
         ui.add_space(4.0);
         hint(ui, &tk, "Create a unit based on Marine to get started. It plays like a Marine until you change its fields.");
         ui.add_space(12.0);
-        if ui.add(Button::new("Create unit based on Marine").min_size(egui::vec2(220.0, 28.0))).clicked() {
-            quick_unit(cx, "Marine");
-        }
-        ui.add_space(6.0);
-        for base in ["Zealot", "Zergling"] {
-            if ui.button(format!("Create unit based on {base}")).clicked() {
+        // One tidy column: every quick-start button has the same size.
+        ui.spacing_mut().item_spacing.y = 6.0;
+        for base in ["Marine", "Zealot", "Zergling"] {
+            let b = Button::new(format!("Create unit based on {base}"))
+                .min_size(egui::vec2(220.0, 28.0));
+            if ui.add(b).clicked() {
                 quick_unit(cx, base);
             }
         }

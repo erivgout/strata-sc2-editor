@@ -108,7 +108,12 @@ impl egui_dock::TabViewer for Viewer<'_> {
 
     fn scroll_bars(&self, tab: &Tab) -> [bool; 2] {
         match tab {
-            Tab::Viewport | Tab::Minimap | Tab::Triggers | Tab::Data | Tab::Strings | Tab::Script => [false, false],
+            Tab::Viewport
+            | Tab::Minimap
+            | Tab::Triggers
+            | Tab::Data
+            | Tab::Strings
+            | Tab::Script => [false, false],
             _ => [false, true],
         }
     }

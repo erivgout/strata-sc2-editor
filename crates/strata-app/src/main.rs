@@ -49,6 +49,7 @@ fn main() {
             .expect("missing #strata_canvas")
             .dyn_into::<web_sys::HtmlCanvasElement>()
             .expect("#strata_canvas is not a canvas");
+        reserve_shortcuts(&document);
         let result = eframe::WebRunner::new()
             .start(
                 canvas,
@@ -85,4 +86,29 @@ fn main() {
             }
         }
     });
+}
+
+/// Keep the browser from acting on Strata's own shortcuts: Ctrl/Cmd+1..4
+/// (switch workspace) would otherwise change browser tabs and Ctrl/Cmd+K
+/// (command palette) would jump to the address bar. egui still receives
+/// the key; only the browser's default action is cancelled. The listener
+/// runs in the capture phase because eframe stops key events at the canvas.
+#[cfg(target_arch = "wasm32")]
+fn reserve_shortcuts(document: &web_sys::Document) {
+    use wasm_bindgen::JsCast;
+    let listener = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(
+        |e: web_sys::KeyboardEvent| {
+            let command = e.ctrl_key() || e.meta_key();
+            let ours = matches!(e.key().as_str(), "1" | "2" | "3" | "4" | "k" | "K");
+            if command && !e.alt_key() && !e.shift_key() && ours {
+                e.prevent_default();
+            }
+        },
+    );
+    let _ = document.add_event_listener_with_callback_and_bool(
+        "keydown",
+        listener.as_ref().unchecked_ref(),
+        true,
+    );
+    listener.forget();
 }
