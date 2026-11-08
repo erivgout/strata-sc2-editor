@@ -4,8 +4,9 @@
 //! GitHub API for the latest release of `erivgout/strata-sc2-editor`. If its version is newer
 //! than this build, the app asks the user. Installing downloads the Windows
 //! executable asset, verifies it against the release's `.sha256` asset
-//! (required: no checksum, no install), swaps it in for the running
-//! executable (with rollback, see [`swap_in`]), and offers to restart.
+//! (required: no checksum, no install) and stages it beside the app. The
+//! running executable is never touched: on restart or quit the staged copy
+//! finishes the update itself with one atomic replace (see [`finish_swap`]).
 //!
 //! Release asset naming (see `scripts/release.ps1`):
 //! `strata-v{version}-windows-x64.exe` and `strata-v{version}-windows-x64.exe.sha256`.
@@ -13,6 +14,7 @@
 //! The web app updates through its service worker instead; this module is
 //! native-only.
 
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 
 const API_LATEST: &str = "https://api.github.com/repos/erivgout/strata-sc2-editor/releases/latest";
@@ -120,7 +122,8 @@ pub enum Event {
     /// `manual`: the user asked, so "up to date" and errors are worth showing.
     Checked { result: Result<Option<Release>, String>, manual: bool },
     Progress(f32),
-    Installed(Result<Release, String>),
+    /// The verified update was staged at the path; apply it with [`Updater::apply`].
+    Installed(Result<(Release, PathBuf), String>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -128,20 +131,22 @@ pub enum Status {
     Idle,
     Checking,
     Downloading { version: String, progress: f32 },
-    /// Installed; restart to run it.
-    Ready(String),
+    /// Downloaded, verified and staged; applied when Strata restarts or quits.
+    Ready { version: String, staged: PathBuf },
 }
 
 pub struct Updater {
     pub status: Status,
     tx: Sender<Event>,
     rx: Receiver<Event>,
+    /// The finishing process was started (once per session).
+    applied: bool,
 }
 
 impl Default for Updater {
     fn default() -> Self {
         let (tx, rx) = channel();
-        Self { status: Status::Idle, tx, rx }
+        Self { status: Status::Idle, tx, rx, applied: false }
     }
 }
 
@@ -172,7 +177,7 @@ impl Updater {
 
     /// Ask GitHub for the latest release in the background.
     pub fn check(&mut self, ctx: &egui::Context, manual: bool) {
-        if self.busy() || matches!(self.status, Status::Ready(_)) {
+        if self.busy() || matches!(self.status, Status::Ready { .. }) {
             return;
         }
         self.status = Status::Checking;
@@ -186,15 +191,15 @@ impl Updater {
         });
     }
 
-    /// Download, verify and install `release` in the background.
+    /// Download, verify and stage `release` in the background.
     pub fn install(&mut self, ctx: &egui::Context, release: Release) {
-        if self.busy() {
+        if self.busy() || matches!(self.status, Status::Ready { .. }) {
             return;
         }
         self.status = Status::Downloading { version: release.version_text(), progress: 0.0 };
         let (tx, ctx) = (self.tx.clone(), ctx.clone());
         std::thread::spawn(move || {
-            let result = download_and_replace(&release, &tx, &ctx).map(|()| release);
+            let result = download_and_stage(&release, &tx, &ctx).map(|staged| (release, staged));
             let _ = tx.send(Event::Installed(result));
             ctx.request_repaint();
         });
@@ -210,14 +215,77 @@ impl Updater {
                     *progress = *p;
                 }
             }
-            Event::Installed(Ok(r)) => self.status = Status::Ready(r.version_text()),
+            Event::Installed(Ok((r, staged))) => {
+                self.status = Status::Ready { version: r.version_text(), staged: staged.clone() }
+            }
             Event::Installed(Err(_)) => self.status = Status::Idle,
         }
         Some(ev)
     }
+
+    /// Start the staged update in "finish" mode: it waits for this process
+    /// to exit, then atomically replaces Strata's executable with itself and,
+    /// if `relaunch`, starts it. Does nothing unless an update is staged, and
+    /// only once per session. Call right before closing.
+    pub fn apply(&mut self, relaunch: bool) -> Result<(), String> {
+        let Status::Ready { staged, .. } = &self.status else { return Ok(()) };
+        if self.applied {
+            return Ok(());
+        }
+        let exe = std::env::current_exe().map_err(|e| format!("can't find Strata's own file ({e})"))?;
+        let mut cmd = std::process::Command::new(staged);
+        cmd.arg(FINISH_FLAG).arg(&exe);
+        if relaunch {
+            cmd.arg(RELAUNCH_FLAG);
+        }
+        cmd.spawn().map_err(|e| format!("couldn't start the update ({e})"))?;
+        self.applied = true;
+        Ok(())
+    }
 }
 
-fn download_and_replace(release: &Release, tx: &Sender<Event>, ctx: &egui::Context) -> Result<(), String> {
+const FINISH_FLAG: &str = "--strata-finish-update";
+const RELAUNCH_FLAG: &str = "--relaunch";
+
+/// Entry point for the finishing process (see [`Updater::apply`]). Returns
+/// true when the arguments asked for it, in which case `main` must exit
+/// without starting the UI.
+pub fn finish_update_from_args() -> bool {
+    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    if args.get(1).is_none_or(|a| a != FINISH_FLAG) {
+        return false;
+    }
+    let (Some(target), Ok(me)) = (args.get(2), std::env::current_exe()) else { return true };
+    let target = PathBuf::from(target);
+    // The old Strata is closing; its file can't be replaced until it has.
+    if finish_swap(&me, &target, 240, std::time::Duration::from_millis(500)).is_ok()
+        && args.get(3).is_some_and(|a| a == RELAUNCH_FLAG)
+    {
+        let _ = std::process::Command::new(&target).spawn();
+    }
+    true
+}
+
+/// Move `staged` onto `target`, retrying while `target` is still in use.
+///
+/// A same-directory rename that replaces an existing file is atomic on
+/// Windows (MoveFileEx with MOVEFILE_REPLACE_EXISTING), so at every instant
+/// `target` is either the complete old executable or the complete new one;
+/// an interruption can never leave it missing. A running executable can't
+/// be replaced, so this only succeeds once the old Strata has exited.
+fn finish_swap(staged: &Path, target: &Path, tries: u32, wait: std::time::Duration) -> Result<(), String> {
+    let mut last = String::new();
+    for _ in 0..tries.max(1) {
+        match std::fs::rename(staged, target) {
+            Ok(()) => return Ok(()),
+            Err(e) => last = e.to_string(),
+        }
+        std::thread::sleep(wait);
+    }
+    Err(last)
+}
+
+fn download_and_stage(release: &Release, tx: &Sender<Event>, ctx: &egui::Context) -> Result<PathBuf, String> {
     let agent = agent();
     let sha_text = get(&agent, &release.sha_url, 4096)?;
     let expected = parse_sha256(&String::from_utf8_lossy(&sha_text))
@@ -249,9 +317,7 @@ fn download_and_replace(release: &Release, tx: &Sender<Event>, ctx: &egui::Conte
     }
 
     let exe = std::env::current_exe().map_err(|e| format!("can't find Strata's own file ({e})"))?;
-    let tag = format!("{}-{}", release.version_text(), std::process::id());
-    let staged = exe.with_file_name(format!(".strata-update-{tag}.exe"));
-    let backup = exe.with_file_name(format!(".strata-old-{tag}.exe"));
+    let staged = exe.with_file_name(format!(".strata-update-{}-{}.exe", release.version_text(), std::process::id()));
     // `create_new`: never reuse a file another instance (or anyone) made.
     let written = std::fs::OpenOptions::new()
         .write(true)
@@ -265,50 +331,29 @@ fn download_and_replace(release: &Release, tx: &Sender<Event>, ctx: &egui::Conte
         let _ = std::fs::remove_file(&staged);
         return Err(format!("can't write the update next to Strata ({e})"));
     }
-    let swapped = swap_in(&exe, &staged, &backup);
-    let _ = std::fs::remove_file(&staged);
-    swapped
+    Ok(staged)
 }
 
-/// Put `staged` at `exe`'s path, keeping the old file at `backup`.
-///
-/// Windows lets a running executable be renamed (not overwritten), so:
-/// rename `exe` -> `backup`, then `staged` -> `exe`. If the second step
-/// fails the first is undone, so `exe` always exists afterwards. The backup
-/// of a successful swap is deleted on the next start ([`clean_up_old`]).
-fn swap_in(exe: &std::path::Path, staged: &std::path::Path, backup: &std::path::Path) -> Result<(), String> {
-    std::fs::rename(exe, backup).map_err(|e| format!("can't replace Strata's file ({e})"))?;
-    if let Err(e) = std::fs::rename(staged, exe) {
-        return match std::fs::rename(backup, exe) {
-            Ok(()) => Err(format!("can't put the update in place ({e})")),
-            Err(e2) => Err(format!(
-                "can't put the update in place ({e}), and restoring the old file failed ({e2}); it is at {}",
-                backup.display()
-            )),
-        };
-    }
-    Ok(())
-}
-
-/// Delete backups left by earlier updates (the running exe is the new one).
+/// Delete staged updates that were never applied (older than a day, so a
+/// concurrently running instance's fresh one is left alone).
 pub fn clean_up_old() {
-    let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.to_path_buf())) else {
-        return;
-    };
+    let Ok(me) = std::env::current_exe() else { return };
+    let Some(dir) = me.parent() else { return };
     let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let day = std::time::Duration::from_secs(24 * 3600);
     for e in entries.flatten() {
         let name = e.file_name();
         let name = name.to_string_lossy();
-        if name.starts_with(".strata-old-") && name.ends_with(".exe") {
+        let stale = e
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > day);
+        if name.starts_with(".strata-update-") && name.ends_with(".exe") && e.path() != me && stale {
             let _ = std::fs::remove_file(e.path());
         }
     }
-}
-
-/// Start the (now updated) executable and let the caller close this one.
-pub fn relaunch() -> Result<(), String> {
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    std::process::Command::new(exe).spawn().map(|_| ()).map_err(|e| format!("couldn't restart Strata ({e})"))
 }
 
 #[cfg(test)]
@@ -353,25 +398,22 @@ mod tests {
     }
 
     #[test]
-    fn swap_replaces_and_rolls_back() {
+    fn finish_swap_replaces_atomically_or_leaves_target_intact() {
         let dir = std::env::temp_dir().join(format!("strata-swap-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let (exe, staged, backup) = (dir.join("strata.exe"), dir.join("new.exe"), dir.join("old.exe"));
+        let (target, staged) = (dir.join("strata.exe"), dir.join(".strata-update-x.exe"));
+        let quick = std::time::Duration::from_millis(1);
 
-        std::fs::write(&exe, b"old").unwrap();
+        std::fs::write(&target, b"old").unwrap();
         std::fs::write(&staged, b"new").unwrap();
-        swap_in(&exe, &staged, &backup).unwrap();
-        assert_eq!(std::fs::read(&exe).unwrap(), b"new");
-        assert_eq!(std::fs::read(&backup).unwrap(), b"old");
+        finish_swap(&staged, &target, 3, quick).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"new");
+        assert!(!staged.exists());
 
-        // Failure after the first rename (the staged file is gone): the
-        // original executable must be back in place.
-        std::fs::remove_file(&backup).unwrap();
-        std::fs::write(&exe, b"old").unwrap();
-        assert!(swap_in(&exe, &dir.join("missing.exe"), &backup).is_err());
-        assert_eq!(std::fs::read(&exe).unwrap(), b"old");
-        assert!(!backup.exists());
+        // A failed swap (nothing staged) leaves the executable untouched.
+        assert!(finish_swap(&staged, &target, 2, quick).is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"new");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

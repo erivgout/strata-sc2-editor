@@ -16,6 +16,10 @@ mod updater;
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result<()> {
+    // A staged update finishing itself after the old Strata closed.
+    if updater::finish_update_from_args() {
+        return Ok(());
+    }
     env_logger::init();
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("Strata")

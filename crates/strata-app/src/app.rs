@@ -509,8 +509,8 @@ impl StrataApp {
             #[cfg(not(target_arch = "wasm32"))]
             Command::CheckForUpdates => match &self.updater.status {
                 // Already installed (e.g. the restart was cancelled): offer it again.
-                crate::updater::Status::Ready(v) => {
-                    let text = format!("Strata {v} is installed. Restart to start using it.");
+                crate::updater::Status::Ready { version, .. } => {
+                    let text = format!("Strata {version} is ready. Restart to finish updating (it also finishes when you quit).");
                     self.notice(Notice {
                         key: "update",
                         kind: ToastKind::Success,
@@ -530,7 +530,7 @@ impl StrataApp {
                 }
             }
             #[cfg(not(target_arch = "wasm32"))]
-            Command::RestartToUpdate => match crate::updater::relaunch() {
+            Command::RestartToUpdate => match self.updater.apply(true) {
                 Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
                 Err(e) => self.state.toast(ToastKind::Error, e),
             },
@@ -654,10 +654,10 @@ impl StrataApp {
                 Event::Checked { result: Err(e), manual: false } => log::info!("update check: {e}"),
                 Event::Checked { .. } => {}
                 Event::Progress(_) => {}
-                Event::Installed(Ok(r)) => self.notice(Notice {
+                Event::Installed(Ok((r, _))) => self.notice(Notice {
                     key: "update",
                     kind: ToastKind::Success,
-                    text: format!("Strata {} is installed. Restart to start using it.", r.version_text()),
+                    text: format!("Strata {} is ready. Restart to finish updating (it also finishes when you quit).", r.version_text()),
                     actions: vec![
                         ("Restart now", NoticeAction::Run(Command::RestartToUpdate)),
                         ("Later", NoticeAction::Dismiss),
@@ -1857,6 +1857,14 @@ impl eframe::App for StrataApp {
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, SETTINGS_KEY, &self.settings);
+    }
+
+    /// Quitting with a staged update finishes it once this window is gone.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn on_exit(&mut self, _gl: Option<&glow::Context>) {
+        if let Err(e) = self.updater.apply(false) {
+            log::warn!("update not applied: {e}");
+        }
     }
 }
 
