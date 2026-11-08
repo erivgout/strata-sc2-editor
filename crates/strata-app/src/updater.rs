@@ -141,13 +141,32 @@ pub struct Updater {
     rx: Receiver<Event>,
     /// The finishing process was started (once per session).
     applied: bool,
+    /// Held while an update is staged so nothing (e.g. another instance's
+    /// clean-up) can delete or change it; see [`lock_staged`].
+    lock: Option<std::fs::File>,
 }
 
 impl Default for Updater {
     fn default() -> Self {
         let (tx, rx) = channel();
-        Self { status: Status::Idle, tx, rx, applied: false }
+        Self { status: Status::Idle, tx, rx, applied: false, lock: None }
     }
+}
+
+/// Open the staged update so that, while this session lives, it can be read
+/// and executed but not deleted, renamed or written (Windows share mode
+/// FILE_SHARE_READ only). Clean-up in other sessions therefore can't remove
+/// it, and the finishing process can only move it once this session exits.
+fn lock_staged(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut o = std::fs::OpenOptions::new();
+    o.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 0x1;
+        o.share_mode(FILE_SHARE_READ);
+    }
+    o.open(path)
 }
 
 fn agent() -> ureq::Agent {
@@ -207,7 +226,16 @@ impl Updater {
 
     /// Drain one event, updating [`Updater::status`].
     pub fn poll(&mut self) -> Option<Event> {
-        let ev = self.rx.try_recv().ok()?;
+        let mut ev = self.rx.try_recv().ok()?;
+        if let Event::Installed(Ok((_, staged))) = &ev {
+            match lock_staged(staged) {
+                Ok(f) => self.lock = Some(f),
+                Err(e) => {
+                    let _ = std::fs::remove_file(staged);
+                    ev = Event::Installed(Err(format!("the downloaded update couldn't be kept ({e})")));
+                }
+            }
+        }
         match &ev {
             Event::Checked { .. } => self.status = Status::Idle,
             Event::Progress(p) => {
@@ -258,9 +286,10 @@ pub fn finish_update_from_args() -> bool {
     let (Some(target), Ok(me)) = (args.get(2), std::env::current_exe()) else { return true };
     let target = PathBuf::from(target);
     // The old Strata is closing; its file can't be replaced until it has.
-    if finish_swap(&me, &target, 240, std::time::Duration::from_millis(500)).is_ok()
-        && args.get(3).is_some_and(|a| a == RELAUNCH_FLAG)
-    {
+    // If it never frees up (another window stays open), the update stays
+    // staged for next time, and a requested restart still happens.
+    let _ = finish_swap(&me, &target, 240, std::time::Duration::from_millis(500));
+    if args.get(3).is_some_and(|a| a == RELAUNCH_FLAG) {
         let _ = std::process::Command::new(&target).spawn();
     }
     true
@@ -334,8 +363,9 @@ fn download_and_stage(release: &Release, tx: &Sender<Event>, ctx: &egui::Context
     Ok(staged)
 }
 
-/// Delete staged updates that were never applied (older than a day, so a
-/// concurrently running instance's fresh one is left alone).
+/// Delete staged updates that were never applied (older than a day). A
+/// session that still has one staged holds it open via [`lock_staged`], so
+/// deleting it fails and it is left alone.
 pub fn clean_up_old() {
     let Ok(me) = std::env::current_exe() else { return };
     let Some(dir) = me.parent() else { return };
@@ -415,6 +445,18 @@ mod tests {
         assert!(finish_swap(&staged, &target, 2, quick).is_err());
         assert_eq!(std::fs::read(&target).unwrap(), b"new");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn staged_update_is_protected_while_locked() {
+        let path = std::env::temp_dir().join(format!(".strata-update-locktest-{}.exe", std::process::id()));
+        std::fs::write(&path, b"staged").unwrap();
+        let lock = lock_staged(&path).unwrap();
+        assert!(std::fs::remove_file(&path).is_err(), "a live session's staged update must survive clean-up");
+        assert!(std::fs::rename(&path, path.with_extension("moved")).is_err());
+        drop(lock);
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]
