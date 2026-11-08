@@ -3230,6 +3230,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "strata-m3"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "strata-casc",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "strata-mcp"
 version = "0.1.0"
 dependencies = [
