@@ -15,10 +15,10 @@
 //!   `custom_script` listing the editor triggers by name (from
 //!   `TriggerStrings.txt`). `Triggers`, `MapScript.galaxy` and the trigger
 //!   strings are always written back byte-identical while the library is
-//!   still just that note — even if the trigger flag is dirty. Once the user
-//!   adds Strata triggers/variables/script, Strata takes over
-//!   `MapScript.galaxy`; the editor's `Triggers` file is still kept verbatim
-//!   (the SC2 editor would regenerate the script from it on its next save).
+//!   still just that note — even if the trigger flag is dirty. Strata can't
+//!   merge its own triggers into editor-made ones yet, so saving such a map
+//!   with Strata triggers/variables/script is refused rather than replacing
+//!   `MapScript.galaxy` (which would silently disable every editor trigger).
 //! - **No triggers at all** (new map): JSON and script are generated.
 
 use strata_core::triggers::TriggerLibrary;
@@ -60,7 +60,7 @@ pub fn editor_note(files: &FileMap) -> String {
     let names = editor_trigger_names(files);
     let mut s = String::from("// Strata: this map's triggers were made in the StarCraft II editor and are\n");
     s.push_str("// preserved unchanged (Triggers, MapScript.galaxy). Adding Strata triggers,\n");
-    s.push_str("// variables or script here makes Strata generate MapScript.galaxy instead.\n");
+    s.push_str("// variables or script is not supported for these maps yet; saving would refuse.\n");
     if !names.is_empty() {
         s.push_str(&format!("// Editor triggers ({}):\n", names.len()));
         for n in names.iter().take(50) {
@@ -101,8 +101,15 @@ fn crlf(s: &str) -> String {
 }
 
 pub fn save(doc: &MapDocument, orig: &FileMap, out: &mut FileMap) -> Result<(), crate::FormatError> {
-    if has_editor_script(orig) && is_placeholder(&doc.triggers, orig) {
-        return Ok(());
+    if has_editor_script(orig) {
+        if is_placeholder(&doc.triggers, orig) {
+            return Ok(());
+        }
+        // Replacing MapScript.galaxy would silently disable every trigger made
+        // in the SC2 editor, so refuse instead.
+        return Err(crate::FormatError::Unsupported(
+            "this map's triggers were made in the StarCraft II editor, and Strata can't combine its own triggers with them yet. Undo or delete the Strata triggers, variables and script, then save again.".into(),
+        ));
     }
     let json = serde_json::to_vec_pretty(&doc.triggers)
         .map_err(|e| crate::FormatError::Malformed { file: STRATA_JSON.into(), reason: e.to_string() })?;
@@ -132,13 +139,10 @@ mod tests {
         let mut out = FileMap::new();
         save(&doc, &files, &mut out).unwrap();
         assert!(out.is_empty());
-        // Taking over: a real trigger makes Strata write the script.
+        // Adding Strata triggers would replace the editor's script and disable
+        // its triggers in game, so saving refuses and writes nothing.
         doc.triggers = TriggerLibrary::with_melee_init();
-        save(&doc, &files, &mut out).unwrap();
-        assert!(String::from_utf8_lossy(&out[SCRIPT]).contains("gt_MeleeInitialization_Func"));
-        assert!(out[SCRIPT].windows(2).any(|w| w == b"\r\n"));
-        let mut merged = files.clone();
-        merged.extend(out);
-        assert_eq!(load(&merged), doc.triggers);
+        assert!(save(&doc, &files, &mut out).is_err());
+        assert!(out.is_empty());
     }
 }
