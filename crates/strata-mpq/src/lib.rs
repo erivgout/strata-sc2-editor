@@ -4,6 +4,46 @@
 //! API contract used by `strata-format` (keep these signatures stable):
 //! - [`Archive::from_bytes`], [`Archive::files`], [`Archive::read`], [`Archive::contains`]
 //! - [`ArchiveBuilder::new`], [`ArchiveBuilder::add`], [`ArchiveBuilder::build`]
+//!
+//! Reading supports format v1-v4 headers (optionally behind an `MPQ\x1B`
+//! user-data block), classic hash/block tables (encrypted, optionally
+//! compressed in v4), the hi-block table, HET/BET tables, single-unit,
+//! sectored, encrypted (incl. `FIX_KEY`) files, and zlib / bzip2 / LZMA /
+//! sparse / PKWARE implode compression. Huffman and ADPCM (WAV-only codecs
+//! from older Blizzard games) are reported as [`MpqError::Unsupported`].
+
+// `as_chunks` (the lint's suggestion) needs Rust 1.88; the workspace MSRV is 1.85.
+#![allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
+
+mod attributes;
+mod compress;
+pub mod crypt;
+mod explode;
+mod hetbet;
+mod read;
+mod write;
+
+pub use read::{Archive, FileInfo, OpenOptions};
+pub use write::ArchiveBuilder;
+
+/// File is PKWARE-imploded.
+pub const FLAG_IMPLODE: u32 = 0x0000_0100;
+/// File is compressed (per-sector compression mask byte).
+pub const FLAG_COMPRESS: u32 = 0x0000_0200;
+/// File is encrypted.
+pub const FLAG_ENCRYPTED: u32 = 0x0001_0000;
+/// Encryption key is adjusted by file position and size.
+pub const FLAG_FIX_KEY: u32 = 0x0002_0000;
+/// File is an incremental patch.
+pub const FLAG_PATCH_FILE: u32 = 0x0010_0000;
+/// File is stored as one unit rather than in sectors.
+pub const FLAG_SINGLE_UNIT: u32 = 0x0100_0000;
+/// File is a deletion marker.
+pub const FLAG_DELETE_MARKER: u32 = 0x0200_0000;
+/// File has per-sector CRCs.
+pub const FLAG_SECTOR_CRC: u32 = 0x0400_0000;
+/// Block entry is in use.
+pub const FLAG_EXISTS: u32 = 0x8000_0000;
 
 #[derive(Debug, thiserror::Error)]
 pub enum MpqError {
@@ -15,52 +55,4 @@ pub enum MpqError {
     NotFound(String),
     #[error("unsupported: {0}")]
     Unsupported(String),
-}
-
-/// A read-only MPQ archive held in memory.
-pub struct Archive {
-    _data: Vec<u8>,
-}
-
-impl Archive {
-    pub fn from_bytes(data: Vec<u8>) -> Result<Archive, MpqError> {
-        let _ = data;
-        Err(MpqError::Unsupported("MPQ reading not implemented yet".into()))
-    }
-
-    /// File names from `(listfile)`, with `\` separators converted to `/`.
-    pub fn files(&self) -> Vec<String> {
-        Vec::new()
-    }
-
-    pub fn contains(&self, name: &str) -> bool {
-        let _ = name;
-        false
-    }
-
-    /// Read and decompress a file. Accepts `/` or `\` separators.
-    pub fn read(&self, name: &str) -> Result<Vec<u8>, MpqError> {
-        Err(MpqError::NotFound(name.to_owned()))
-    }
-}
-
-/// Builds a new MPQ archive (format v1 or v3 as SC2 expects) in memory.
-#[derive(Default)]
-pub struct ArchiveBuilder {
-    files: Vec<(String, Vec<u8>)>,
-}
-
-impl ArchiveBuilder {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Add a file; `/` separators are stored as `\`.
-    pub fn add(&mut self, name: &str, data: Vec<u8>) {
-        self.files.push((name.to_owned(), data));
-    }
-
-    pub fn build(self) -> Result<Vec<u8>, MpqError> {
-        Err(MpqError::Unsupported("MPQ writing not implemented yet".into()))
-    }
 }
