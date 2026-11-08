@@ -382,9 +382,9 @@ fn describe_request(kind: &LinkKind) -> String {
     }
 }
 
-/// Whether replacing the open map would lose work the user can't undo back to.
+/// Whether replacing the open map would lose unsaved work.
 fn has_unsaved_changes(state: &EditorState) -> bool {
-    state.history.is_modified() && state.history.can_undo()
+    state.history.is_modified()
 }
 
 fn status_json(state: &EditorState) -> Value {

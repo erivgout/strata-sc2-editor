@@ -64,6 +64,10 @@ pub struct Desc {
     pub textures: Vec<String>,
 }
 
+/// Upper bound on vertices per side we accept from map files (SC2 maps are at
+/// most 256 cells); guards allocation against corrupt or hostile dimensions.
+const MAX_VERTS: u32 = 1025;
+
 fn floats(s: Option<&str>) -> Vec<f64> {
     s.map(|s| s.split_whitespace().filter_map(|p| p.parse().ok()).collect()).unwrap_or_default()
 }
@@ -75,7 +79,8 @@ pub fn parse_desc(bytes: &[u8]) -> Option<Desc> {
     }
     let hm = doc.root.child("heightMap")?;
     let dim = floats(hm.attr("dim"));
-    if dim.len() < 2 || dim[0] < 2.0 || dim[1] < 2.0 {
+    let valid = |v: f64| v.is_finite() && v.fract() == 0.0 && (2.0..=MAX_VERTS as f64).contains(&v);
+    if dim.len() < 2 || !valid(dim[0]) || !valid(dim[1]) {
         return None;
     }
     let vd = hm.child("vertData");
@@ -209,7 +214,7 @@ pub fn load(files: &FileMap, size: Option<(u32, u32)>) -> Option<(Terrain, Strin
     let desc = lookup(files, XML).and_then(parse_desc);
     let (w, h) = match &desc {
         Some(d) => (d.verts.0 - 1, d.verts.1 - 1),
-        None => size?,
+        None => size.filter(|&(w, h)| (1..MAX_VERTS).contains(&w) && (1..MAX_VERTS).contains(&h))?,
     };
     let mut t = Terrain::new(w, h);
     let Some(desc) = desc else {
@@ -709,6 +714,16 @@ pub fn minimap(t: &Terrain) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_bad_terrain_dimensions() {
+        for dim in ["NaN 2", "inf 9", "2.5 9", "1 9", "999999 999999", "-3 9"] {
+            let xml = format!("<?xml version=\"1.0\"?><terrain><heightMap dim=\"{dim}\"/></terrain>");
+            assert!(parse_desc(xml.as_bytes()).is_none(), "accepted dim {dim}");
+        }
+        assert!(load(&FileMap::new(), Some((u32::MAX, 4))).is_none());
+        assert!(load(&FileMap::new(), Some((0, 4))).is_none());
+    }
 
     fn doc_with(w: u32, h: u32) -> MapDocument {
         let mut d = MapDocument::new("T", w, h);

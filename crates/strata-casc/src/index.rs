@@ -77,13 +77,15 @@ impl LocalIndex {
         {
             return Err(bad(&format!("unsupported layout (revision {revision})")));
         }
-        let block = (8 + header_size + 0x0F) & !0x0F;
-        let entries_size = data
-            .get(block..block + 4)
-            .map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize)
+        // Checked: header_size comes from the file and usize is 32-bit on wasm.
+        let block = header_size.checked_add(8 + 0x0F).map(|v| v & !0x0F).ok_or_else(|| bad("bad header size"))?;
+        let entries_size = block
+            .checked_add(8)
+            .and_then(|end| data.get(block..end))
+            .map(|b| u32::from_le_bytes(b[..4].try_into().unwrap()) as usize)
             .ok_or_else(|| bad("missing entry block"))?;
         let start = block + 8;
-        let end = (start + entries_size).min(data.len());
+        let end = start.saturating_add(entries_size).min(data.len());
         let mask = (1u64 << segment_bits) - 1;
         self.entries.reserve((end - start) / 18);
         for e in data[start..end].chunks_exact(18) {
@@ -171,5 +173,17 @@ mod tests {
         assert_eq!(idx.len(), 1);
         assert_eq!(idx.find(&key), Some(loc));
         assert_eq!(idx.find(&[8u8; 16]), None);
+    }
+
+    #[test]
+    fn truncated_entry_block_header_is_an_error() {
+        let full = build_idx(3, &[([7u8; 16], Location { archive: 1, offset: 2, size: 3 })]);
+        let block = (8 + u32::from_le_bytes(full[0..4].try_into().unwrap()) as usize + 0x0F) & !0x0F;
+        for cut in block + 4..block + 8 {
+            assert!(LocalIndex::default().add_file(&full[..cut]).is_err(), "cut at {cut}");
+        }
+        let mut huge = full.clone();
+        huge[0..4].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(LocalIndex::default().add_file(&huge).is_err());
     }
 }

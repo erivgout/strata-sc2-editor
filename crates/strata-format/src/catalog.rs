@@ -16,14 +16,16 @@ pub const DIR: &str = "Base.SC2Data/GameData/";
 
 /// "Base.SC2Data/GameData/UnitData.xml" -> "UnitData".
 pub fn file_of(path: &str) -> Option<&str> {
-    if path.len() <= DIR.len() || !path[..DIR.len()].eq_ignore_ascii_case(DIR) {
+    let head = path.get(..DIR.len())?;
+    if !head.eq_ignore_ascii_case(DIR) {
         return None;
     }
     let name = &path[DIR.len()..];
-    if name.contains('/') || name.len() <= 4 || !name[name.len() - 4..].eq_ignore_ascii_case(".xml") {
+    let stem = name.len().checked_sub(4).and_then(|i| name.get(..i)).filter(|s| !s.is_empty())?;
+    if name.contains('/') || !name[stem.len()..].eq_ignore_ascii_case(".xml") {
         return None;
     }
-    Some(&name[..name.len() - 4])
+    Some(stem)
 }
 
 pub fn path_of(file: &str) -> String {
@@ -154,6 +156,10 @@ mod tests {
     fn paths() {
         assert_eq!(file_of("Base.SC2Data/GameData/UnitData.xml"), Some("UnitData"));
         assert_eq!(file_of("Base.SC2Data/GameData/Sub/UnitData.xml"), None);
+        // Multi-byte characters around the fixed offsets must not panic.
+        assert_eq!(file_of("Assets/Textures/a日本語.dds"), None);
+        assert_eq!(file_of("Base.SC2Data/GameData/日本.xml"), Some("日本"));
+        assert_eq!(file_of("Base.SC2Data/GameData/é"), None);
         assert_eq!(path_of("AbilData"), "Base.SC2Data/GameData/AbilData.xml");
     }
 }
