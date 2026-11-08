@@ -3164,10 +3164,13 @@ dependencies = [
 name = "strata-mcp"
 version = "0.1.0"
 dependencies = [
+ "glam",
+ "httparse",
  "serde",
  "serde_json",
  "strata-core",
  "strata-format",
+ "tungstenite",
 ]
 
 [[package]]

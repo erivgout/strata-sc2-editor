@@ -8,13 +8,17 @@ use crate::document::{DirtyFlags, MapDocument, MapInfo};
 use crate::objects::{ObjectId, PlacedObject};
 use crate::regions::{Camera, Region};
 use crate::strings::Strings;
-use crate::terrain::TerrainPatch;
+use crate::terrain::{TerrainPatch, TextureLayer};
 use crate::triggers::TriggerLibrary;
 
 /// A reversible change. `apply(doc, true)` does it, `apply(doc, false)` undoes it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Edit {
     Terrain { before: TerrainPatch, after: TerrainPatch },
+    /// Replace the whole texture layer stack (adding or removing a layer).
+    TextureLayers { before: Vec<TextureLayer>, after: Vec<TextureLayer> },
+    /// Change the water plane height (`None` = no water).
+    Water { before: Option<f32>, after: Option<f32> },
     /// Insert (`before: None`), delete (`after: None`) or modify an object.
     Object { id: ObjectId, before: Option<PlacedObject>, after: Option<PlacedObject> },
     Regions { before: Vec<Region>, after: Vec<Region> },
@@ -35,6 +39,14 @@ impl Edit {
         match self {
             Edit::Terrain { before, after } => {
                 doc.terrain.apply(pick(forward, before, after));
+                doc.dirty.terrain = true;
+            }
+            Edit::TextureLayers { before, after } => {
+                doc.terrain.layers = pick(forward, before, after).clone();
+                doc.dirty.terrain = true;
+            }
+            Edit::Water { before, after } => {
+                doc.terrain.water_height = *pick(forward, before, after);
                 doc.dirty.terrain = true;
             }
             Edit::Object { id, before, after } => {
@@ -101,7 +113,7 @@ impl Edit {
     pub fn dirty(&self) -> DirtyFlags {
         let mut d = DirtyFlags::default();
         match self {
-            Edit::Terrain { .. } => d.terrain = true,
+            Edit::Terrain { .. } | Edit::TextureLayers { .. } | Edit::Water { .. } => d.terrain = true,
             Edit::Object { .. } => d.objects = true,
             Edit::Regions { .. } => d.regions = true,
             Edit::Cameras { .. } => d.cameras = true,

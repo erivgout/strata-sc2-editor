@@ -5,8 +5,15 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[[bin]]
+name = "strata-mcp"
+path = "src/main.rs"
+
 [dependencies]
 strata-core.workspace = true
 strata-format.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+glam.workspace = true
+tungstenite = { version = "0.27", default-features = false, features = ["handshake"] }
+httparse = "1"
