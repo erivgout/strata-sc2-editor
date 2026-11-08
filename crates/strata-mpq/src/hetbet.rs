@@ -100,13 +100,16 @@ pub fn parse_bet(data: &[u8]) -> Result<BetTable, MpqError> {
         flags.push(u32_at(data, flags_start + i * 4)?);
     }
     let table_start = flags_start + flag_count * 4;
-    let table_len = (entry_size * entry_count as u64).div_ceil(8) as usize;
-    let table = data
-        .get(table_start..table_start + table_len)
-        .ok_or_else(|| MpqError::Corrupt("BET table truncated".into()))?;
-    let hash_start = table_start + table_len;
+    let truncated = || MpqError::Corrupt("BET table truncated".into());
+    if entry_size == 0 && entry_count > 0 {
+        return Err(MpqError::Corrupt("BET entry size is zero".into()));
+    }
+    let table_len =
+        usize::try_from((entry_size * entry_count as u64).div_ceil(8)).map_err(|_| truncated())?;
+    let hash_start = table_start.checked_add(table_len).ok_or_else(truncated)?;
+    let table = data.get(table_start..hash_start).ok_or_else(truncated)?;
     let hashes = data
-        .get(hash_start..(hash_start + hash_array_size).min(data.len()))
+        .get(hash_start..hash_start.saturating_add(hash_array_size).min(data.len()))
         .unwrap_or(&[]);
     let table = BitArray(table);
     let hashes = BitArray(hashes);

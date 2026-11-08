@@ -64,6 +64,8 @@ pub struct FileInfo {
     pub flags: u32,
     /// CRC32 from `(attributes)`, when present.
     pub crc32: Option<u32>,
+    /// MD5 of the uncompressed data from `(attributes)`, when present.
+    pub md5: Option<[u8; 16]>,
 }
 
 /// A read-only MPQ archive held in memory.
@@ -77,7 +79,7 @@ pub struct Archive {
     index: Index,
     blocks: Vec<BlockEntry>,
     names: Vec<String>,
-    crcs: Option<Vec<u32>>,
+    attributes: crate::attributes::Attributes,
 }
 
 fn rd_u16(d: &[u8], off: usize) -> Option<u16> {
@@ -179,11 +181,11 @@ fn find_header(d: &[u8]) -> Option<(usize, Header, Option<Range<usize>>)> {
         let magic = &d[off..off + 4];
         if magic == MAGIC_USER_DATA {
             if let (Some(header_offs), Some(ud_len)) = (rd_u32(d, off + 8), rd_u32(d, off + 12)) {
-                let at = off + header_offs as usize;
+                let at = off.saturating_add(header_offs as usize);
                 if header_offs as usize >= 16 {
                     if let Some(h) = parse_header(d, at) {
                         let ud_start = off + 16;
-                        let ud_end = (ud_start + ud_len as usize).min(at).min(d.len());
+                        let ud_end = ud_start.saturating_add(ud_len as usize).min(at);
                         return Some((at, h, Some(ud_start..ud_end.max(ud_start))));
                     }
                 }
@@ -325,7 +327,7 @@ impl Archive {
             index,
             blocks,
             names: Vec::new(),
-            crcs: None,
+            attributes: Default::default(),
         };
         archive.load_listfile();
         archive.load_attributes();
@@ -355,13 +357,18 @@ impl Archive {
         let Ok(attr) = self.read("(attributes)") else {
             return;
         };
-        self.crcs = crate::attributes::parse_crcs(&attr, self.blocks.len());
+        self.attributes = crate::attributes::parse(&attr, self.blocks.len());
     }
 
     /// File names from `(listfile)`, with `\` separators converted to `/`.
     /// Only names that actually exist in the archive are returned.
     pub fn files(&self) -> Vec<String> {
         self.names.clone()
+    }
+
+    /// Borrowing variant of [`Archive::files`].
+    pub fn file_names(&self) -> &[String] {
+        &self.names
     }
 
     pub fn contains(&self, name: &str) -> bool {
@@ -385,7 +392,8 @@ impl Archive {
             size: b.fsize,
             compressed_size: b.csize,
             flags: b.flags,
-            crc32: self.crcs.as_ref().and_then(|c| c.get(index).copied()),
+            crc32: (self.attributes.crcs.as_ref()).and_then(|c| c.get(index).copied()),
+            md5: (self.attributes.md5s.as_ref()).and_then(|m| m.get(index).copied()),
         })
     }
 
@@ -513,6 +521,10 @@ impl Archive {
                 raw
             };
             if packed && input.len() < fsize {
+                // Guard against garbage sizes before allocating the output.
+                if b.fsize > b.csize.saturating_mul(4096).max(1 << 24) {
+                    return Err(corrupt(format!("{name}: implausible size {}", b.fsize)));
+                }
                 let mut out = alloc_zeroed(b.fsize)?;
                 unpack(input, &mut out, imploded).map_err(|e| ctx(e, name))?;
                 return Ok(out);
@@ -526,10 +538,9 @@ impl Archive {
 
         let ss = self.sector_size;
         let sectors = fsize.div_ceil(ss);
-        let mut out = alloc_zeroed(b.fsize)?;
 
         if !packed {
-            out.copy_from_slice(&raw[..fsize]);
+            let mut out = raw[..fsize].to_vec();
             if encrypted {
                 for (i, chunk) in out.chunks_mut(ss).enumerate() {
                     decrypt(chunk, key.wrapping_add(i as u32));
@@ -550,8 +561,13 @@ impl Archive {
             .chunks_exact(4)
             .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]) as usize)
             .collect();
+        // Grow the output as sectors decode, so a corrupt size cannot force
+        // a huge allocation up front.
+        let mut out = Vec::new();
+        out.try_reserve_exact(fsize.min(raw.len().saturating_mul(16).max(ss)))
+            .map_err(|_| MpqError::Unsupported(format!("cannot allocate {fsize} bytes")))?;
         let mut scratch = Vec::new();
-        for (i, dst) in out.chunks_mut(ss).enumerate() {
+        for i in 0..sectors {
             let (lo, hi) = (offsets[i], offsets[i + 1]);
             let sector = raw
                 .get(lo..hi)
@@ -564,10 +580,13 @@ impl Archive {
             } else {
                 sector
             };
-            if sector.len() < dst.len() {
-                unpack(sector, dst, imploded).map_err(|e| ctx(e, name))?;
+            let start = out.len();
+            let len = ss.min(fsize - start);
+            if sector.len() < len {
+                out.resize(start + len, 0);
+                unpack(sector, &mut out[start..], imploded).map_err(|e| ctx(e, name))?;
             } else {
-                dst.copy_from_slice(&sector[..dst.len()]);
+                out.extend_from_slice(&sector[..len]);
             }
         }
         Ok(out)

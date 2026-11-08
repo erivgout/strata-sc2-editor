@@ -5,11 +5,12 @@
 //! `[file data...][hash table][block table]`.
 //!
 //! The header is format v3 with only classic (encrypted) hash/block tables;
-//! no HET/BET. StormLib, MPQEditor and SC2 all accept this. Files are split
-//! into sectors, each zlib-compressed when that makes it smaller; files that
-//! do not shrink overall are stored. `(listfile)` and `(attributes)`
-//! (CRC32 + zero FILETIME) are generated. Output is deterministic: files are
-//! ordered by case-insensitive name regardless of insertion order.
+//! no HET/BET, which StormLib, MPQEditor and SC2 accept. Files up to one
+//! sector are written as a single compressed unit and larger files as
+//! sectors, each zlib-compressed when that makes it smaller -- the same
+//! layout the SC2 editor produces. `(listfile)` and `(attributes)`
+//! (CRC32 + MD5, like the SC2 editor) are generated. Output is deterministic:
+//! files are ordered by case-insensitive name regardless of insertion order.
 
 use std::collections::HashMap;
 
@@ -18,7 +19,7 @@ use crate::crypt::{
     encrypt, hash_string, HASH_NAME_A, HASH_NAME_B, HASH_TABLE_OFFSET, KEY_BLOCK_TABLE,
     KEY_HASH_TABLE,
 };
-use crate::{MpqError, FLAG_COMPRESS, FLAG_EXISTS};
+use crate::{MpqError, FLAG_COMPRESS, FLAG_EXISTS, FLAG_SINGLE_UNIT};
 
 const HEADER_SIZE_V3: usize = 68;
 const LISTFILE: &str = "(listfile)";
@@ -71,7 +72,7 @@ impl ArchiveBuilder {
         self
     }
 
-    /// zlib level 0-10 (default 6). 0 stores everything uncompressed.
+    /// zlib level 0-10 (default 6). 0 stores all data uncompressed.
     pub fn with_compression_level(mut self, level: u8) -> Self {
         self.level = level.min(10);
         self
@@ -157,15 +158,21 @@ impl ArchiveBuilder {
 
         let mut blocks = Vec::with_capacity(total_files);
         let mut crcs = Vec::with_capacity(total_files);
+        let mut md5s = Vec::with_capacity(total_files);
         let mut names: Vec<String> = Vec::with_capacity(total_files);
         for (name, data) in &entries {
             blocks.push(write_file(&mut out, base, data, sector_size, level)?);
-            crcs.push(crc32fast::hash(data));
+            if attributes {
+                crcs.push(crc32fast::hash(data));
+                md5s.push(crate::attributes::md5(data));
+            }
             names.push(name.clone());
         }
         if attributes {
-            crcs.push(0); // the (attributes) entry itself
-            let attr = crate::attributes::build(&crcs);
+            // (attributes) cannot checksum itself; its entry is left zeroed.
+            crcs.push(0);
+            md5s.push([0; 16]);
+            let attr = crate::attributes::build(&crcs, &md5s);
             blocks.push(write_file(&mut out, base, &attr, sector_size, level)?);
             names.push(ATTRIBUTES.to_owned());
         }
@@ -241,41 +248,44 @@ fn write_file(
             flags: FLAG_EXISTS,
         });
     }
-    if level > 0 {
-        let sectors = data.len().div_ceil(sector_size);
-        let table_len = (sectors + 1) * 4;
-        out.resize(start + table_len, 0);
-        let mut offsets = Vec::with_capacity(sectors + 1);
-        offsets.push(table_len as u32);
-        for chunk in data.chunks(sector_size) {
-            match compress_sector_zlib(chunk, level) {
-                Some(c) => out.extend_from_slice(&c),
-                None => out.extend_from_slice(chunk),
-            }
-            offsets.push((out.len() - start) as u32);
-            if out.len() - start >= data.len() {
-                break; // cannot win; store instead
-            }
+    let compress = |chunk: &[u8]| {
+        (level > 0)
+            .then(|| compress_sector_zlib(chunk, level))
+            .flatten()
+    };
+    if data.len() <= sector_size {
+        // Small files: one compressed unit, as the SC2 editor writes them.
+        match compress(data) {
+            Some(c) => out.extend_from_slice(&c),
+            None => out.extend_from_slice(data),
         }
-        let csize = out.len() - start;
-        if offsets.len() == sectors + 1 && csize < data.len() {
-            for (i, off) in offsets.iter().enumerate() {
-                out[start + i * 4..start + i * 4 + 4].copy_from_slice(&off.to_le_bytes());
-            }
-            return Ok(Block {
-                pos,
-                csize: csize as u32,
-                fsize,
-                flags: FLAG_EXISTS | FLAG_COMPRESS,
-            });
-        }
-        out.truncate(start);
+        return Ok(Block {
+            pos,
+            csize: (out.len() - start) as u32,
+            fsize,
+            flags: FLAG_EXISTS | FLAG_COMPRESS | FLAG_SINGLE_UNIT,
+        });
     }
-    out.extend_from_slice(data);
+    // Larger files: sector offset table, then each sector compressed when
+    // that makes it smaller (a sector of full length is read back raw).
+    let sectors = data.len().div_ceil(sector_size);
+    let table_len = (sectors + 1) * 4;
+    out.resize(start + table_len, 0);
+    let mut offset = table_len;
+    out[start..start + 4].copy_from_slice(&(offset as u32).to_le_bytes());
+    for (i, chunk) in data.chunks(sector_size).enumerate() {
+        match compress(chunk) {
+            Some(c) => out.extend_from_slice(&c),
+            None => out.extend_from_slice(chunk),
+        }
+        offset = out.len() - start;
+        let at = start + (i + 1) * 4;
+        out[at..at + 4].copy_from_slice(&(offset as u32).to_le_bytes());
+    }
     Ok(Block {
         pos,
-        csize: fsize,
+        csize: offset as u32,
         fsize,
-        flags: FLAG_EXISTS,
+        flags: FLAG_EXISTS | FLAG_COMPRESS,
     })
 }

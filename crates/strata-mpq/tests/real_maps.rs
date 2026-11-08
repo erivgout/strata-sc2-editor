@@ -109,6 +109,7 @@ fn check_one(path: &Path) -> Result<bool, String> {
     }
     let mut total = 0usize;
     let mut crc_checked = 0usize;
+    let mut md5_checked = 0usize;
     let mut contents = Vec::with_capacity(names.len());
     for name in &names {
         let data = archive
@@ -125,6 +126,14 @@ fn check_one(path: &Path) -> Result<bool, String> {
                 return Err(format!("{name}: crc {actual:08x} != {crc:08x}"));
             }
             crc_checked += 1;
+        }
+        if let Some(md5) = info.md5.filter(|m| m != &[0; 16]) {
+            use md5::Digest;
+            let actual: [u8; 16] = md5::Md5::digest(&data).into();
+            if actual != md5 {
+                return Err(format!("{name}: md5 mismatch"));
+            }
+            md5_checked += 1;
         }
         total += data.len();
         contents.push((name.clone(), data));
@@ -179,16 +188,20 @@ fn check_one(path: &Path) -> Result<bool, String> {
         if info.crc32 != Some(crc32fast::hash(data)) {
             return Err(format!("rebuilt attributes crc wrong for {name}"));
         }
+        if info.md5.is_none() {
+            return Err(format!("rebuilt attributes md5 missing for {name}"));
+        }
     }
 
     eprintln!(
-        "ok  {} | v{} sector {} | {} files, {} bytes unpacked, {} CRCs verified | het/bet: {} | read {:?} | rebuilt {} -> {} bytes in {:?}",
+        "ok  {} | v{} sector {} | {} files, {} bytes unpacked, {} CRCs + {} MD5s verified | het/bet: {} | read {:?} | rebuilt {} -> {} bytes in {:?}",
         path.display(),
         archive.format_version() + 1,
         archive.sector_size(),
         names.len(),
         total,
         crc_checked,
+        md5_checked,
         if het.uses_het_bet() { "verified" } else { "absent" },
         read_time,
         size,

@@ -1,6 +1,7 @@
 //! List an archive's files with sizes, flags and read status.
 //!
 //! `cargo run -p strata-mpq --example mpq_info -- <archive> [name-to-extract out-path]`
+//! `cargo run -p strata-mpq --example mpq_info -- <archive> --rebuild <out-archive>`
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -16,10 +17,21 @@ fn main() {
             std::process::exit(1);
         }
     };
-    if let [_, name, out] = &args[..] {
-        let data = archive.read(name).expect("read file");
-        std::fs::write(out, data).expect("write output");
-        return;
+    match &args[..] {
+        [_, flag, out] if flag == "--rebuild" => {
+            let mut builder = strata_mpq::ArchiveBuilder::new();
+            for name in archive.file_names() {
+                builder.add(name, archive.read(name).expect("read file"));
+            }
+            std::fs::write(out, builder.build().expect("build")).expect("write output");
+            return;
+        }
+        [_, name, out] => {
+            let data = archive.read(name).expect("read file");
+            std::fs::write(out, data).expect("write output");
+            return;
+        }
+        _ => {}
     }
     println!(
         "format v{}, sector size {}, header at {:#x}, user data {} bytes, {} blocks, het/bet {}",

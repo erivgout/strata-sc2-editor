@@ -93,9 +93,21 @@ fn roundtrip_many_files() {
         let info = a.file_info(name).unwrap();
         assert_eq!(info.size, data.len() as u64);
         assert_eq!(info.crc32, Some(crc32fast::hash(data)));
+        let md5: [u8; 16] = <md5::Md5 as md5::Digest>::digest(data).into();
+        assert_eq!(info.md5, Some(md5));
     }
-    // Incompressible data is stored; compressible data is compressed.
-    assert_eq!(a.file_info("Noise.bin").unwrap().flags, FLAG_EXISTS);
+    // Like the SC2 editor: small files are single compressed units, larger
+    // ones sectored; incompressible sectors are kept raw.
+    let noise = a.file_info("Noise.bin").unwrap();
+    assert_eq!(noise.flags, FLAG_EXISTS | FLAG_COMPRESS);
+    assert_eq!(noise.compressed_size, 1_000_000 + 63 * 4); // 62 sectors + end offset
+    let script = a.file_info("MapScript.galaxy").unwrap();
+    assert_eq!(script.flags, FLAG_EXISTS | FLAG_COMPRESS | FLAG_SINGLE_UNIT);
+    assert!(script.compressed_size < 8000);
+    let one = a.file_info("one").unwrap();
+    assert_eq!(one.flags, FLAG_EXISTS | FLAG_COMPRESS | FLAG_SINGLE_UNIT);
+    assert_eq!(one.compressed_size, 1);
+    assert_eq!(a.file_info("Empty.txt").unwrap().flags, FLAG_EXISTS);
     let hm = a.file_info("t3HeightMap").unwrap();
     assert_eq!(hm.flags, FLAG_EXISTS | FLAG_COMPRESS);
     assert!(hm.compressed_size < 50_000);
@@ -156,7 +168,10 @@ fn options_small_sectors_no_attributes_stored() {
     let mut b = ArchiveBuilder::new().with_compression_level(0);
     b.add("x.txt", data.clone());
     let a = Archive::from_bytes(b.build().unwrap()).unwrap();
-    assert_eq!(a.file_info("x.txt").unwrap().flags, FLAG_EXISTS);
+    assert_eq!(
+        a.file_info("x.txt").unwrap().compressed_size,
+        100_000 + 8 * 4
+    );
     assert_eq!(a.read("x.txt").unwrap(), data);
 }
 
@@ -330,5 +345,47 @@ fn encrypted_single_unit_and_fix_key_files() {
     );
     for f in &files[1..] {
         assert_eq!(a.read(f.name).unwrap(), f.data, "{}", f.name);
+    }
+}
+
+#[test]
+fn corrupt_archives_do_not_panic() {
+    let mut b = ArchiveBuilder::new().with_sector_size_shift(1);
+    let mut names = Vec::new();
+    for i in 0..12 {
+        let name = format!("dir/file{i}.txt");
+        let data = if i % 2 == 0 {
+            text(3000 + i * 500, i)
+        } else {
+            noise(2000, i as u32)
+        };
+        b.add(&name, data);
+        names.push(name);
+    }
+    let good = b.build().unwrap();
+    let mut x = 0x9E37_79B9u32;
+    let mut rng = move || {
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        x as usize
+    };
+    for round in 0..400 {
+        let mut bytes = good.clone();
+        let n = bytes.len();
+        match round % 4 {
+            0 => bytes.truncate(rng() % n),
+            // Hash/block table region at the end.
+            1 => (0..4).for_each(|_| bytes[n - 1 - rng() % 600] = rng() as u8),
+            2 => bytes[4 + rng() % 64] = rng() as u8,
+            _ => (0..8).for_each(|_| bytes[rng() % n] = rng() as u8),
+        }
+        if let Ok(a) = Archive::from_bytes(bytes) {
+            for name in a.files().iter().chain(names.iter()) {
+                let _ = a.read(name);
+            }
+            let _ = a.read("(listfile)");
+            let _ = a.read("(attributes)");
+        }
     }
 }
