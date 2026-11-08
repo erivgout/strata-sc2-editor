@@ -74,6 +74,21 @@ pub struct TerrainTex {
 /// melee mods' textures and models. GameData (for `CTerrainTex`) comes from
 /// [`strata_core::base_data::casc_filter`], which callers OR in.
 pub fn casc_filter(path: &str) -> bool {
+    // Campaign and Co-op roots: maps depending on Co-op (and the campaigns it
+    // builds on) place units whose models and actor data live there.
+    const EXTRA_ROOTS: [&str; 5] = [
+        "campaigns/liberty.sc2campaign/",
+        "campaigns/swarm.sc2campaign/",
+        "campaigns/void.sc2campaign/",
+        "mods/starcoop/starcoop.sc2mod/",
+        "mods/novastoryassets.sc2mod/",
+    ];
+    if let Some(rest) = EXTRA_ROOTS.iter().find_map(|r| path.strip_prefix(r)) {
+        let asset = rest.starts_with("base.sc2assets/") && (rest.ends_with(".dds") || rest.ends_with(".m3"));
+        let data = rest.starts_with("base.sc2data/gamedata/")
+            && (rest.ends_with("actordata.xml") || rest.ends_with("modeldata.xml"));
+        return asset || data;
+    }
     let Some(rest) = path.strip_prefix("mods/") else { return false };
     let Some((m, rest)) = rest.split_once(".sc2mod/") else { return false };
     rest.starts_with("base.sc2assets/")
@@ -300,8 +315,6 @@ impl Assets {
     }
 
     /// Raw bytes of a game file.
-    // Part of the shared contract; its consumer is the model renderer.
-    #[allow(dead_code)]
     pub fn file(&self, path: &str) -> Asset<Arc<[u8]>> {
         let path = normalize_path(path);
         let mut g = lock(&self.inner);

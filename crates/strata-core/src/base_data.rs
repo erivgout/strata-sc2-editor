@@ -44,7 +44,8 @@ const NAME_PREFIXES: &[&str] = &[
 ];
 
 /// Format version of [`BaseCatalog::to_bytes`]; bump when the layout changes.
-const FORMAT: u32 = 1;
+/// 2: catalog token declarations (`<?token?>`) are kept.
+const FORMAT: u32 = 2;
 const MAGIC: &[u8; 4] = b"STBD";
 
 /// A placeable unit type from the base game, for pickers.
@@ -89,6 +90,11 @@ pub struct BaseCatalog {
     pub origin: Vec<u8>,
     /// Display names: "Unit/Name/Marine" -> "Marine".
     pub strings: HashMap<String, String>,
+    /// Token declarations (`<?token id="Race" value="Terran"?>`) per entry
+    /// index, as (token, default value). Templates such as
+    /// `Assets\##Prefix####Race##\##id##\##id##.m3` are filled from these.
+    #[serde(default)]
+    pub tokens: std::collections::BTreeMap<usize, Vec<(String, String)>>,
     #[serde(skip)]
     index: HashMap<(CatalogKind, String), usize>,
     /// Class name -> its default entry.
@@ -174,6 +180,16 @@ impl BaseCatalog {
 
     pub fn entry(&self, i: usize) -> Option<&CatalogEntry> {
         self.entries.get(i)
+    }
+
+    /// The tokens entry `i` declares, as (token, default value).
+    pub fn declared_tokens(&self, i: usize) -> &[(String, String)] {
+        self.tokens.get(&i).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// The class default entry (`<CUnit default="1">`) of `class`.
+    pub fn class_default(&self, class: &str) -> Option<usize> {
+        self.defaults.get(class).copied()
     }
 
     /// The mod that first defined entry `i`.
@@ -491,18 +507,20 @@ impl BaseBuilder {
         if root.name != "Catalog" {
             return Ok(0);
         }
+        let mut tokens = scan_tokens(text);
         let mut n = 0;
-        for node in root.children {
+        for (i, node) in root.children.into_iter().enumerate() {
             if !node.name.starts_with('C') {
                 continue; // <const>, <Include>...
             }
-            self.add_entry(kind, node);
+            let declared = tokens.get_mut(i).map(std::mem::take).unwrap_or_default();
+            self.add_entry(kind, node, declared);
             n += 1;
         }
         Ok(n)
     }
 
-    fn add_entry(&mut self, kind: CatalogKind, node: XmlNode) {
+    fn add_entry(&mut self, kind: CatalogKind, node: XmlNode, declared: Vec<(String, String)>) {
         let id = node.attr("id").unwrap_or("").to_owned();
         // Class defaults are per class; named entries share one id space per kind.
         let class_key = if id.is_empty() {
@@ -511,6 +529,16 @@ impl BaseBuilder {
             String::new()
         };
         let key = (kind, id, class_key);
+        if !declared.is_empty() {
+            let index = self.by_key.get(&key).copied().unwrap_or(self.cat.entries.len());
+            let list = self.cat.tokens.entry(index).or_default();
+            for (t, v) in declared {
+                match list.iter_mut().find(|(x, _)| *x == t) {
+                    Some(slot) => slot.1 = v,
+                    None => list.push((t, v)),
+                }
+            }
+        }
         match self.by_key.get(&key) {
             Some(&i) => merge(&mut self.cat.entries[i].node, &node),
             None => {
@@ -542,6 +570,72 @@ impl BaseBuilder {
         self.cat.rebuild();
         self.cat
     }
+}
+
+/// Token declarations directly inside each top-level element of a catalog
+/// file, by element position (the order `XmlNode::parse` keeps children in).
+/// `<?token id="Race" value="Terran"?>` declares token `Race` with default
+/// `Terran`; the XML parser drops processing instructions, so this is a
+/// separate light scan. A token without a value defaults to "".
+fn scan_tokens(text: &str) -> Vec<Vec<(String, String)>> {
+    let b = text.as_bytes();
+    let mut out: Vec<Vec<(String, String)>> = Vec::new();
+    let mut depth = 0usize;
+    let mut i = 0usize;
+    let find = |from: usize, pat: &str| text.get(from..).and_then(|r| r.find(pat)).map(|k| from + k);
+    while let Some(lt) = find(i, "<") {
+        let rest = &text[lt..];
+        if rest.starts_with("<!--") {
+            i = find(lt + 4, "-->").map_or(b.len(), |k| k + 3);
+        } else if rest.starts_with("<?") {
+            let end = find(lt + 2, "?>").unwrap_or(b.len());
+            let body = &text[lt + 2..end];
+            if depth == 2 && body.starts_with("token") {
+                if let Some(cur) = out.last_mut() {
+                    let attr = |name: &str| {
+                        let k = body.find(&format!("{name}=\""))? + name.len() + 2;
+                        let v = &body[k..];
+                        v.find('"').map(|e| v[..e].to_owned())
+                    };
+                    if let Some(id) = attr("id") {
+                        cur.push((id, attr("value").unwrap_or_default()));
+                    }
+                }
+            }
+            i = (end + 2).min(b.len());
+        } else if rest.starts_with("<![CDATA[") {
+            i = find(lt, "]]>").map_or(b.len(), |k| k + 3);
+        } else if rest.starts_with("<!") {
+            i = find(lt, ">").map_or(b.len(), |k| k + 1);
+        } else if rest.starts_with("</") {
+            depth = depth.saturating_sub(1);
+            i = find(lt, ">").map_or(b.len(), |k| k + 1);
+        } else {
+            // An element start: find its end, skipping quoted attribute values.
+            let mut k = lt + 1;
+            let mut quote = None;
+            while k < b.len() {
+                match (quote, b[k]) {
+                    (Some(q), c) if c == q => quote = None,
+                    (None, b'"' | b'\'') => quote = Some(b[k]),
+                    (None, b'>') => break,
+                    _ => {}
+                }
+                k += 1;
+            }
+            if depth == 1 {
+                out.push(Vec::new());
+            }
+            if b.get(k.wrapping_sub(1)) != Some(&b'/') {
+                depth += 1;
+            }
+            i = (k + 1).min(b.len());
+        }
+        if i <= lt {
+            break;
+        }
+    }
+    out
 }
 
 /// Merges a later mod's declaration of an element into the existing one.
@@ -848,6 +942,42 @@ mod tests {
             c.inherited_value(&map, 1, &FieldKey::new("Race")).map(|(v, _)| v),
             Some("Terr")
         );
+    }
+
+    #[test]
+    fn keeps_token_declarations() {
+        let mut b = BaseCatalog::builder("1");
+        b.begin_mod("Core");
+        let xml = r#"<?xml version="1.0"?>
+<Catalog>
+    <!-- <CModel id="Commented"><?token id="X" value="no"?></CModel> -->
+    <CModel default="1" id="Unit">
+        <?token id="Race" value="Neutral"?>
+        <?token id="Prefix" value="Units\"?>
+        <Model value="Assets\##Prefix####Race##\##id##\##id##.m3"/>
+    </CModel>
+    <const id="$x" value="a>b"/>
+    <CModel default="1" id="MarineBase" parent="Unit">
+        <?token id="Race" value="Terran"?>
+        <?token id="low" type="CModelLink"?>
+        <Flags index="A" value="1"/>
+    </CModel>
+    <CModel id="Marine" parent="MarineBase"/>
+</Catalog>"#;
+        b.add_catalog("modeldata.xml", xml.as_bytes()).unwrap();
+        b.begin_mod("Liberty");
+        b.add_catalog(
+            "modeldata.xml",
+            br#"<Catalog><CModel default="1" id="MarineBase"><?token id="Race" value="Zerg"?></CModel></Catalog>"#,
+        )
+        .unwrap();
+        let c = BaseCatalog::from_bytes(&b.finish().to_bytes()).unwrap();
+        let pair = |a: &str, b: &str| (a.to_owned(), b.to_owned());
+        let unit = c.find(CatalogKind::Model, "Unit").unwrap();
+        assert_eq!(c.declared_tokens(unit), [pair("Race", "Neutral"), pair("Prefix", "Units\\")]);
+        let base = c.find(CatalogKind::Model, "MarineBase").unwrap();
+        assert_eq!(c.declared_tokens(base), [pair("Race", "Zerg"), pair("low", "")]);
+        assert!(c.declared_tokens(c.find(CatalogKind::Model, "Marine").unwrap()).is_empty());
     }
 
     #[test]

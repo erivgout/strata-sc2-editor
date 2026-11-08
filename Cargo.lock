@@ -3184,6 +3184,7 @@ dependencies = [
  "strata-core",
  "strata-dds",
  "strata-format",
+ "strata-m3",
  "tungstenite",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -3226,6 +3227,15 @@ dependencies = [
  "serde_json",
  "strata-core",
  "strata-mpq",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "strata-m3"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "strata-casc",
  "thiserror 2.0.21",
 ]
 

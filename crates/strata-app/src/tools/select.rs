@@ -93,8 +93,12 @@ pub fn object_screen_radius(o: &PlacedObject, view: &View) -> f32 {
 pub fn pick_object(state: &EditorState, view: &View, p: Vec2) -> Option<ObjectId> {
     let mut best: Option<(f32, ObjectId)> = None;
     for o in &state.doc.objects.objects {
-        let Some(s) = view.project(o.position) else { continue };
-        let r = object_screen_radius(o, view).max(7.0);
+        // Objects drawn as 3D models are picked by the model's footprint.
+        let (at, r) = match state.ui.viewport.models.drawn.get(&o.id) {
+            Some(m) => (m.anchor, (m.radius * view.points_per_unit(m.anchor)).clamp(7.0, 200.0)),
+            None => (o.position, object_screen_radius(o, view).max(7.0)),
+        };
+        let Some(s) = view.project(at) else { continue };
         let d = s.distance(p);
         if d <= r && best.is_none_or(|(bd, _)| d < bd) {
             best = Some((d, o.id));

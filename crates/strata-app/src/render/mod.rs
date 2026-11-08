@@ -4,12 +4,14 @@
 //! - [`pick`]: ray vs heightfield.
 //! - [`mesh`]: CPU mesh, texture palette and dirty-row tracking.
 //! - [`gl`]: shaders, buffers and the egui paint callback.
+//! - [`models`]: placed units and doodads as their real `.m3` models.
 //! - [`overlay`]: objects, regions and cameras drawn with the egui painter.
 //! - [`textures`]: the game's terrain textures behind each texture layer.
 
 pub mod camera;
 pub mod gl;
 pub mod mesh;
+pub mod models;
 pub mod overlay;
 pub mod pick;
 pub mod textures;

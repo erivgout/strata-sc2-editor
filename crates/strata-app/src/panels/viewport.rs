@@ -10,6 +10,7 @@ use strata_core::objects::ObjectId;
 
 use crate::render::camera::{OrbitCamera, Pose, View, MAP_PITCH};
 use crate::render::gl::{self, FrameParams};
+use crate::render::models::ModelRenderer;
 use crate::render::{overlay, pick, TerrainRenderer};
 use crate::state::{EditorState, Mode};
 use crate::theme::{self, Tokens};
@@ -18,6 +19,8 @@ use crate::tools::{ToolInput, ToolState};
 pub struct ViewportState {
     pub camera: OrbitCamera,
     pub renderer: TerrainRenderer,
+    /// Units and doodads as 3D models.
+    pub models: ModelRenderer,
     pub tools: ToolState,
     pub show_grid: bool,
     pub show_contours: bool,
@@ -46,6 +49,7 @@ impl Default for ViewportState {
         Self {
             camera: OrbitCamera::default(),
             renderer: TerrainRenderer::default(),
+            models: ModelRenderer::default(),
             tools: ToolState::default(),
             show_grid: true,
             show_contours: false,
@@ -174,6 +178,9 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState) {
         vs.renderer.prepare(&state.doc.terrain, state.history.revision(), stroke_rect, force);
     }
     let layers = state.ui.viewport.renderer.prepare_textures(&state.assets, &state.doc.terrain);
+    let mut models = std::mem::take(&mut state.ui.viewport.models);
+    models.prepare(&ctx, state, &view, &state.ui.viewport.renderer.shared);
+    state.ui.viewport.models = models;
 
     // Terrain.
     let painter = ui.painter_at(rect);
@@ -212,7 +219,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState) {
     } else {
         None
     };
-    overlay::draw_document(&painter, state, &view, rect, hovered_obj, &overlay::MAP);
+    overlay::draw_document(&painter, state, &view, rect, hovered_obj, &overlay::MAP, &state.ui.viewport.models.drawn);
     state.ui.viewport.tools.paint(&painter, state, &input);
     if let Some(o) = hovered_obj.and_then(|id| state.doc.objects.get(id)) {
         response.clone().on_hover_ui_at_pointer(|ui| object_tooltip(ui, state, o, &tk));

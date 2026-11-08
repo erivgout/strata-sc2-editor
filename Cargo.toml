@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/strata-mpq", "crates/strata-casc", "crates/strata-core", "crates/strata-format", "crates/strata-app", "crates/strata-mcp", "crates/strata-dds"]
+members = ["crates/strata-mpq", "crates/strata-casc", "crates/strata-core", "crates/strata-format", "crates/strata-app", "crates/strata-mcp", "crates/strata-dds", "crates/strata-m3"]
 
 [workspace.package]
 version = "0.1.0"
@@ -14,6 +14,7 @@ strata-casc = { path = "crates/strata-casc" }
 strata-core = { path = "crates/strata-core" }
 strata-format = { path = "crates/strata-format" }
 strata-dds = { path = "crates/strata-dds" }
+strata-m3 = { path = "crates/strata-m3" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

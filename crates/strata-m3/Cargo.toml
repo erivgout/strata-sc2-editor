@@ -1,0 +1,13 @@
+[package]
+name = "strata-m3"
+description = "Reads StarCraft II .m3 models into a static, render-ready mesh (pure Rust, wasm-compatible, no I/O)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+glam.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+strata-casc.workspace = true

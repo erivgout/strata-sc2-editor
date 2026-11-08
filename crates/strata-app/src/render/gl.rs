@@ -73,6 +73,8 @@ pub struct Shared {
     pub error: Option<String>,
     /// Number of MSAA samples in use (0 = none), for diagnostics.
     pub samples: i32,
+    /// Placed units and doodads as 3D models, drawn after the terrain.
+    pub models: super::models::ModelPass,
 }
 
 pub type SharedHandle = Arc<Mutex<Shared>>;
@@ -96,11 +98,11 @@ pub fn callback(shared: SharedHandle, rect: egui::Rect, params: FrameParams) -> 
                     }
                 }
             }
-            let Shared { gpu, uploads, .. } = &mut *s;
+            let Shared { gpu, uploads, models, .. } = &mut *s;
             if let Some(g) = gpu.as_mut() {
                 unsafe {
                     g.upload(gl, uploads);
-                    g.paint(gl, &info, &params, painter.intermediate_fbo());
+                    g.paint(gl, &info, &params, painter.intermediate_fbo(), models);
                 }
             }
         })),
@@ -490,7 +492,7 @@ unsafe fn layer_array(gl: &glow::Context, aniso: Option<f32>) -> Result<glow::Te
     }
 }
 
-fn header(gl: &glow::Context) -> Result<&'static str, String> {
+pub(super) fn header(gl: &glow::Context) -> Result<&'static str, String> {
     match egui_glow::ShaderVersion::get(gl) {
         egui_glow::ShaderVersion::Es300 => {
             Ok("#version 300 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;\nprecision highp sampler2DArray;\n")
@@ -500,7 +502,7 @@ fn header(gl: &glow::Context) -> Result<&'static str, String> {
     }
 }
 
-unsafe fn compile(
+pub(super) unsafe fn compile(
     gl: &glow::Context,
     hdr: &str,
     vs: &str,
@@ -849,6 +851,7 @@ impl Gpu {
         info: &egui::PaintCallbackInfo,
         p: &FrameParams,
         out_fbo: Option<glow::Framebuffer>,
+        models: &mut super::models::ModelPass,
     ) {
         unsafe {
             let vp = info.viewport_in_pixels();
@@ -922,6 +925,8 @@ impl Gpu {
                 gl.bind_texture(glow::TEXTURE_2D_ARRAY, None);
                 gl.active_texture(glow::TEXTURE0);
             }
+
+            models.paint(gl, p);
 
             if let Some(z) = p.water {
                 gl.disable(glow::CULL_FACE);
