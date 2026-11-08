@@ -19,30 +19,47 @@ the official Galaxy Editor, and that AI assistants can drive through MCP.
 | Finding things | Nested menus and modules | One command palette (Ctrl+K) with every command and its shortcut |
 | Layout | Separate module windows | Dockable panels around the map; triggers never hide the map |
 | Undo | Per editor module | One history for every change, including edits made by AI clients |
-| AI assistants | None | MCP server, live link into the running editor (in progress) |
+| AI assistants | None | Built-in MCP server, plus a live link that applies AI edits in the open editor (undoable, labeled AI) |
 | File format | SC2Map archives and folders | Same files, written back losslessly; plus a JSON project format |
 
 What works today:
 
-- App shell: menu bar, mode rail, dockable panels, status bar, dark and light themes.
-- Command palette with fuzzy search, recently used commands and shortcuts.
-- New map dialog (size presets or custom, tileset, base level).
-- Opening `.SC2Map` files and Strata projects (`.strata.json`) by dialog or
-  drag and drop; unpacked map folders on native.
-- Saving: native writes to disk; the web version downloads the file.
-  If writing `.SC2Map` fails, Strata offers a lossless project export instead.
-- Autosave and restore, unsaved-changes guard, recent files.
-- Installable web app with offline support.
+- Real maps: opens `.SC2Map` archives and folder maps, and writes them back
+  byte-for-byte unless you changed something. Verified in StarCraft II
+  (build 98310): a map made from scratch in Strata, a real map saved
+  unchanged, and edited real maps all load and play.
+- Real game data: on desktop Strata reads the base game's units, abilities,
+  weapons and names straight from your StarCraft II install (in a browser,
+  pick the install folder once). The Data editor shows inherited values,
+  such as Marine's 45 life.
+- Map editing: 3D terrain with sculpt, paint, cliff level and pathing
+  brushes; units, doodads, points, start locations, regions and cameras.
+- Triggers: editor with a searchable library of 348 functions taken from the
+  game's own trigger library, live Galaxy script with a linter.
+- Data, Text, Map properties, Problems and History panels; workspaces
+  (Ctrl+1..4), command palette, dark and light themes, autosave,
+  installable web app.
+- MCP: `strata-mcp` for Claude Code, Claude Desktop and other MCP clients.
 
-Planned or in progress (built in parallel and landing incrementally):
-terrain sculpting, painting and cliffs, unit and doodad placement, regions and
-cameras, the trigger editor, the data editor, Galaxy script view, text and
-localization, validation in the Problems panel, the live MCP link, and full
-`.SC2Map` read/write coverage.
+## Known issues
+
+- Maps whose triggers were made in the official editor keep those triggers
+  untouched, but Strata can't add its own triggers to them yet: saving such a
+  map with Strata triggers is refused rather than breaking the existing ones.
+- Cliff edits change cliff levels but don't generate cliff or ramp meshes.
+- Water and the unbuildable / no-fly pathing flags can't be edited yet.
+- Editing `DocInfo/*` or player-name strings in the Text panel may be
+  overridden by Map properties on save; teams and start locations edited in
+  Map properties aren't saved yet.
+- `strata-mcp --http` (opt-in) is loopback-only and Origin-checked but does
+  not require the pairing token yet; the default stdio transport is
+  unaffected.
+- Archives whose `(listfile)` is missing entries are refused, because their
+  unnamed files couldn't be preserved on save.
 
 ## Screenshots
 
-Screenshots will be added once the map viewport lands.
+Screenshots are coming.
 
 ## Build and run
 

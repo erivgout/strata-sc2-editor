@@ -151,6 +151,9 @@ fn check_one(path: &Path) -> Result<bool, String> {
         if het.files() != names {
             return Err("HET/BET listing differs from classic".into());
         }
+        if het.unlisted_count() != 0 {
+            return Err(format!("HET/BET reports {} unlisted files", het.unlisted_count()));
+        }
         for (name, data) in &contents {
             let d = het
                 .read(name)
