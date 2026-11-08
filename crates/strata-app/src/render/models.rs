@@ -585,10 +585,9 @@ impl ModelRenderer {
             };
             match assets.file(&path) {
                 Asset::Missing => *next += 1,
-                Asset::Loading => {
-                    self.models[mi].state = ModelState::Loading { path };
-                    return true;
-                }
+                // Still being looked up: stay on this candidate and ask again
+                // next frame, so a miss moves on to the next one.
+                Asset::Loading => return true,
                 Asset::Ready(_) => {
                     self.models[mi].state = ModelState::Loading { path };
                     return false;
