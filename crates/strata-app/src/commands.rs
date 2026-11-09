@@ -43,6 +43,8 @@ pub enum Command {
     LoadGameData,
     FrameMap,
     ShowProblems,
+    /// Desktop: play the map in StarCraft II (unsaved edits included).
+    TestMap,
     InstallApp,
     /// Desktop: ask GitHub for a newer release.
     CheckForUpdates,
@@ -119,6 +121,7 @@ impl Command {
             Command::LoadGameData => "Load game data from StarCraft II folder…".into(),
             Command::FrameMap => "Frame the whole map".into(),
             Command::ShowProblems => "Check map for problems".into(),
+            Command::TestMap => "Test map in StarCraft II".into(),
             Command::InstallApp => "Install Strata as an app".into(),
             Command::CheckForUpdates => "Check for updates…".into(),
             Command::InstallUpdate => "Install update".into(),
@@ -145,7 +148,7 @@ impl Command {
             Command::Workspace(_) => "Workspace",
             Command::FocusTab(_) => "Panel",
             Command::Theme(_) | Command::ResetLayout | Command::OpenPalette => "View",
-            Command::FrameMap | Command::ShowProblems => "Map",
+            Command::FrameMap | Command::ShowProblems | Command::TestMap => "Map",
             Command::LoadGameData => "Data",
             Command::ConnectAi => "AI link",
             Command::ShowShortcuts
@@ -197,6 +200,7 @@ impl Command {
             Command::LoadGameData => "base game install casc units catalog blizzard mods",
             Command::FrameMap => "zoom fit camera center",
             Command::ShowProblems => "validate errors warnings",
+            Command::TestMap => "play run launch game test document starcraft",
             Command::InstallApp => "pwa desktop offline",
             Command::CheckForUpdates | Command::InstallUpdate | Command::RestartToUpdate => "update upgrade version release new",
             Command::About => "version license",
@@ -216,6 +220,8 @@ impl Command {
             Command::ShowShortcuts => ks(Modifiers::NONE, Key::F1),
             Command::SetMode(m) => ks(Modifiers::NONE, mode_key(*m)),
             Command::Workspace(w) => ks(Modifiers::COMMAND, workspace_key(*w)),
+            // The official editor's Test Document shortcut.
+            Command::TestMap => ks(Modifiers::COMMAND, Key::F9),
             _ => return None,
         })
     }
@@ -260,6 +266,11 @@ pub fn all(cx: &Context<'_>) -> Vec<Command> {
         Command::ResetLayout,
         Command::FrameMap,
         Command::ShowProblems,
+    ]);
+    if cfg!(not(target_arch = "wasm32")) {
+        v.push(Command::TestMap);
+    }
+    v.extend([
         Command::LoadGameData,
         Command::ConnectAi,
         Command::ShowShortcuts,
@@ -288,6 +299,9 @@ fn shortcut_commands() -> Vec<Command> {
         Command::OpenPalette,
         Command::ShowShortcuts,
     ];
+    if cfg!(not(target_arch = "wasm32")) {
+        v.push(Command::TestMap);
+    }
     v.extend(Workspace::ALL.map(Command::Workspace));
     v.extend(Mode::ALL.map(Command::SetMode));
     v
@@ -768,8 +782,10 @@ impl ShortcutsOverlay {
                     Command::OpenMap,
                     Command::Save,
                     Command::SaveAs,
+                    Command::TestMap,
                 ]
                 .iter()
+                .filter(|c| cfg!(not(target_arch = "wasm32")) || **c != Command::TestMap)
                 .map(|c| (c.label(), ctx.format_shortcut(&c.shortcut().unwrap())))
                 .collect(),
             ),

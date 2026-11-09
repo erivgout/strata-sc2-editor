@@ -127,15 +127,35 @@ fn file_name_of(path: &std::path::Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
+/// File types for the Open dialog. Native: a map folder also opens by
+/// picking any file in it, such as its ComponentList.SC2Components.
+#[cfg(not(target_arch = "wasm32"))]
+const OPEN_FILTERS: &[(&str, &[&str])] = &[
+    ("StarCraft II map, map folder or Strata project", &["SC2Map", "SC2Components", "json"]),
+    ("StarCraft II map", &["SC2Map"]),
+    ("Strata project", &["json"]),
+];
+#[cfg(target_arch = "wasm32")]
+const OPEN_FILTERS: &[(&str, &[&str])] = &[
+    ("StarCraft II map or Strata project", &["SC2Map", "json"]),
+    ("StarCraft II map", &["SC2Map"]),
+    ("Strata project", &["json"]),
+];
+
 fn open_dialog() -> rfd::AsyncFileDialog {
-    let d = rfd::AsyncFileDialog::new().set_title("Open map");
-    // Native: a map folder opens by picking any file in it (the dialog
-    // can't pick folders), such as its ComponentList.SC2Components.
-    #[cfg(not(target_arch = "wasm32"))]
-    let d = d.add_filter("StarCraft II map, map folder or Strata project", &["SC2Map", "SC2Components", "json"]);
-    #[cfg(target_arch = "wasm32")]
-    let d = d.add_filter("StarCraft II map or Strata project", &["SC2Map", "json"]);
-    d.add_filter("StarCraft II map", &["SC2Map"]).add_filter("Strata project", &["json"])
+    OPEN_FILTERS.iter().fold(rfd::AsyncFileDialog::new().set_title("Open map"), |d, (name, exts)| d.add_filter(*name, exts))
+}
+
+/// Native: ask for a map to open. On Windows, opening a map folder in the
+/// dialog picks it rather than browsing into it.
+#[cfg(not(target_arch = "wasm32"))]
+fn pick_map_to_open() -> Option<std::path::PathBuf> {
+    #[cfg(windows)]
+    match crate::win_dialog::open("Open map", OPEN_FILTERS) {
+        Ok(picked) => return picked.map(|p| map_root(&p)),
+        Err(e) => log::warn!("Windows open dialog failed ({e}); using the portable one"),
+    }
+    block_on(open_dialog().pick_file()).map(|h| map_root(h.path()))
 }
 
 /// The map to open for a picked path: a file inside a map folder (named
@@ -269,9 +289,8 @@ impl Io {
             self.busy = Some("Choosing a map…".into());
         }
         #[cfg(not(target_arch = "wasm32"))]
-        self.send_from_worker(ctx, || match block_on(open_dialog().pick_file()) {
-            Some(h) => {
-                let path = map_root(h.path());
+        self.send_from_worker(ctx, || match pick_map_to_open() {
+            Some(path) => {
                 let name = file_name_of(&path);
                 match load_native(&path) {
                     Ok(doc) => IoEvent::Opened {
@@ -601,6 +620,20 @@ impl Io {
             SaveKind::Folder => free_name(dir.as_deref(), sc2map_name(doc, file_name), true),
         };
         self.send_from_worker(ctx, move || {
+            // Windows: picking an existing map folder chooses it instead
+            // of browsing into it.
+            #[cfg(windows)]
+            if !matches!(kind, SaveKind::Project) {
+                let (title, filter): (&str, &[(&str, &[&str])]) = match kind {
+                    SaveKind::Folder => ("Save map as a map folder", &[("StarCraft II map folder", &["SC2Map"])]),
+                    _ => ("Save map as a .SC2Map file", &[("StarCraft II map", &["SC2Map"])]),
+                };
+                match crate::win_dialog::save(title, filter, &file, dir.as_deref()) {
+                    Ok(Some(path)) => return IoEvent::SaveTo { path, kind },
+                    Ok(None) => return IoEvent::Cancelled,
+                    Err(e) => log::warn!("Windows save dialog failed ({e}); using the portable one"),
+                }
+            }
             let dialog = match kind {
                 SaveKind::Project => {
                     rfd::AsyncFileDialog::new().set_title("Export project").add_filter("Strata project", &["json"])

@@ -9,8 +9,12 @@ mod game_data;
 #[cfg(windows)]
 mod install;
 mod io;
+#[cfg(windows)]
+mod win_dialog;
 mod mcp_link;
 mod panels;
+#[cfg(not(target_arch = "wasm32"))]
+mod playtest;
 mod render;
 mod state;
 mod theme;

@@ -371,6 +371,12 @@ impl Assets {
         r
     }
 
+    /// The StarCraft II install folder attached (native), if any.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn install_dir(&self) -> Option<std::path::PathBuf> {
+        lock(&self.inner).source_key.clone().map(std::path::PathBuf::from)
+    }
+
     /// Whether the install's file index is open (so [`Assets::exists`] answers).
     pub fn ready(&self) -> bool {
         lock(&self.inner).phase == Phase::Open

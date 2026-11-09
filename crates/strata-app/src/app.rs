@@ -539,6 +539,25 @@ impl StrataApp {
                 };
                 self.state.toast(kind, msg);
             }
+            Command::TestMap => {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let root = self
+                        .state
+                        .assets
+                        .install_dir()
+                        .or_else(|| strata_core::base_data::default_install_dirs().into_iter().next());
+                    match crate::playtest::launch(&self.state.doc, root.as_deref()) {
+                        Ok(msg) => self.state.toast(ToastKind::Info, msg),
+                        Err(text) => self.notice(Notice {
+                            key: "test-map",
+                            kind: ToastKind::Error,
+                            text,
+                            actions: vec![("Dismiss", NoticeAction::Dismiss)],
+                        }),
+                    }
+                }
+            }
             Command::InstallApp => crate::io::install(),
             Command::ShowWelcome => self.dialog = Some(Dialog::Welcome),
             Command::About => self.dialog = Some(Dialog::About),
@@ -1053,6 +1072,8 @@ impl StrataApp {
                 );
                 self.menu_cmd(ui, Command::FrameMap);
                 self.menu_cmd(ui, Command::ShowProblems);
+                #[cfg(not(target_arch = "wasm32"))]
+                self.menu_cmd(ui, Command::TestMap);
                 ui.separator();
                 self.menu_cmd(ui, Command::ImportAssets);
                 self.menu_cmd(ui, Command::NewCustomUnit);
@@ -1086,7 +1107,17 @@ impl StrataApp {
         let seg_w = workspace_switcher_width(ui);
         let gap = 8.0;
         let left = menus.right() + 16.0;
-        let right = bar.right() - 4.0;
+        #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
+        let mut right = bar.right() - 4.0;
+        // Desktop: Test (play the map in StarCraft II) at the right end.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let w = 72.0;
+            if right - w - gap > left {
+                self.test_button(ui, Rect::from_min_size(Pos2::new(right - w, y - 12.0), Vec2::new(w, 24.0)), &t);
+                right -= w + gap;
+            }
+        }
         if seg_w > right - left {
             return;
         }
@@ -1172,6 +1203,46 @@ impl StrataApp {
             if resp.clicked() {
                 self.queued.push(cmd);
             }
+        }
+    }
+
+    /// The Test button: play the open map in StarCraft II.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn test_button(&mut self, ui: &mut egui::Ui, rect: Rect, t: &Tokens) {
+        let resp = ui.interact(rect, ui.id().with("test-map"), egui::Sense::click());
+        let p = ui.painter();
+        let fill = if resp.hovered() { t.accent } else { t.accent.gamma_multiply(0.85) };
+        p.rect_filled(rect, 6.0, fill);
+        if resp.has_focus() {
+            p.rect_stroke(rect, 6.0, Stroke::new(1.5, t.text), egui::StrokeKind::Outside);
+        }
+        // Dark text on the light dark-theme accent; white on the deep light-theme one.
+        let ink = if ui.visuals().dark_mode { t.bg_deep } else { Color32::WHITE };
+        let label = p.layout_no_wrap("Test".to_owned(), egui::FontId::new(14.0, theme::medium()), ink);
+        let tri = 9.0;
+        let content = tri + 6.0 + label.size().x;
+        let x = rect.center().x - content / 2.0;
+        let cy = rect.center().y;
+        p.add(egui::Shape::convex_polygon(
+            vec![Pos2::new(x, cy - tri / 2.0 - 1.0), Pos2::new(x + tri, cy), Pos2::new(x, cy + tri / 2.0 + 1.0)],
+            ink,
+            Stroke::NONE,
+        ));
+        p.galley(Pos2::new(x + tri + 6.0, cy - label.size().y / 2.0), label, ink);
+        let cmd = Command::TestMap;
+        let keys = cmd.shortcut().map(|s| ui.ctx().format_shortcut(&s));
+        let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_ui(|ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(cmd.label()).family(theme::medium()));
+                if let Some(k) = &keys {
+                    commands::keycap(ui, k, t);
+                }
+            });
+            ui.label("Plays this map as it is now, unsaved changes included.");
+        });
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Test map in StarCraft II"));
+        if resp.clicked() {
+            self.queued.push(cmd);
         }
     }
 
