@@ -1,5 +1,6 @@
 //! Placed units and doodads drawn as their real `.m3` models, read from the
-//! user's own StarCraft II install through [`crate::assets`].
+//! map's own packed files (custom models and textures) and from the user's
+//! own StarCraft II install through [`crate::assets`].
 //!
 //! UI thread ([`ModelRenderer::prepare`], every frame):
 //! 1. Placed types are resolved to model files through the catalogs
@@ -155,9 +156,86 @@ enum SupplementState {
     Ready(Arc<BaseCatalog>),
 }
 
+/// Models and textures packed into the map, by normalized path. Rebuilt
+/// when the map's files change; the renderer starts over then, so nothing
+/// drawn can come from a replaced or removed file.
+#[derive(Default)]
+struct MapFiles {
+    /// History revision the signature was taken at.
+    revision: Option<u64>,
+    /// Fingerprint of the files' names, sizes, heads and tails.
+    signature: Option<u64>,
+    files: HashMap<String, Arc<[u8]>>,
+    /// Decoded textures (`None`: not a readable DDS).
+    decoded: HashMap<String, Option<Arc<strata_dds::Image>>>,
+}
+
+impl MapFiles {
+    fn wanted(path: &str) -> bool {
+        let p = path.to_ascii_lowercase();
+        p.ends_with(".m3") || p.ends_with(".dds")
+    }
+
+    /// Bring the snapshot up to date. Returns true when the files changed
+    /// since the last snapshot (not on the first one).
+    fn sync(&mut self, state: &EditorState) -> bool {
+        let rev = state.history.revision();
+        if self.revision == Some(rev) {
+            return false;
+        }
+        self.revision = Some(rev);
+        let wanted: Vec<(&String, &Vec<u8>)> =
+            state.doc.passthrough.iter().filter(|(k, _)| Self::wanted(k)).collect();
+        // Replacing a texture with another of the same size is common
+        // (same resolution), so sample the contents too.
+        let mut sig: u64 = 0xcbf29ce484222325;
+        let mut mix = |bytes: &[u8]| {
+            for &b in bytes {
+                sig = (sig ^ b as u64).wrapping_mul(0x100000001b3);
+            }
+        };
+        for (k, v) in &wanted {
+            mix(k.as_bytes());
+            mix(&v.len().to_le_bytes());
+            mix(&v[..v.len().min(4096)]);
+            mix(&v[v.len().saturating_sub(4096)..]);
+        }
+        if self.signature == Some(sig) {
+            return false;
+        }
+        let changed = self.signature.is_some();
+        self.signature = Some(sig);
+        self.files = wanted
+            .into_iter()
+            .map(|(k, v)| (strata_core::map_files::norm(k), Arc::from(v.clone().into_boxed_slice())))
+            .collect();
+        self.decoded.clear();
+        changed
+    }
+
+    fn texture(&mut self, norm: &str) -> Option<Arc<strata_dds::Image>> {
+        if let Some(t) = self.decoded.get(norm) {
+            return t.clone();
+        }
+        let img = self.files.get(norm).and_then(|b| match strata_dds::decode_max_side(b, TEXTURE_SIDE) {
+            Ok(i) => Some(Arc::new(i)),
+            Err(e) => {
+                log::warn!("{norm}: {e}");
+                None
+            }
+        });
+        self.decoded.insert(norm.to_owned(), img.clone());
+        img
+    }
+}
+
+/// Candidate prefix for a file packed into the map.
+const MAP_PREFIX: &str = "@map:";
+
 /// CPU side of the model view. Lives in the viewport state.
 #[derive(Default)]
 pub struct ModelRenderer {
+    map_files: MapFiles,
     types: HashMap<TypeKey, TypeState>,
     models: Vec<ModelEntry>,
     by_path: HashMap<String, usize>,
@@ -241,7 +319,14 @@ impl ModelRenderer {
         let t0 = web_time_now();
         self.drawn.clear();
         let assets = state.assets.clone();
-        if !assets.available() {
+        if self.map_files.sync(state) {
+            // A packed model or texture was imported, replaced or removed.
+            let (files, generation) = (std::mem::take(&mut self.map_files), self.generation);
+            self.reset(shared);
+            self.map_files = files;
+            self.generation = generation;
+        }
+        if !assets.available() && self.map_files.files.is_empty() {
             self.stats = ModelStats::default();
             if let Ok(mut s) = shared.lock() {
                 s.models.frame.clear();
@@ -512,12 +597,17 @@ impl ModelRenderer {
         files.iter().flat_map(|f| self.candidates(f)).collect()
     }
 
-    /// CASC paths to try for a data path: dependency roots (last loaded
-    /// first), then the melee mods through the asset service.
+    /// Paths to try for a data path: the map's own packed file, then CASC
+    /// paths under the dependency roots (last loaded first), then the melee
+    /// mods through the asset service.
     fn candidates(&self, data_path: &str) -> Vec<String> {
         let rel = strata_casc::normalize_path(data_path);
-        let mut out: Vec<String> =
-            self.supplement.roots.iter().rev().map(|r| format!("{r}/base.sc2assets/{rel}")).collect();
+        let mut out = Vec::new();
+        let packed = strata_core::map_files::norm(data_path);
+        if self.map_files.files.contains_key(&packed) {
+            out.push(format!("{MAP_PREFIX}{packed}"));
+        }
+        out.extend(self.supplement.roots.iter().rev().map(|r| format!("{r}/base.sc2assets/{rel}")));
         out.push(format!("@resolve:{data_path}"));
         out
     }
@@ -553,7 +643,8 @@ impl ModelRenderer {
                 }
                 ModelState::Loading { path } => {
                     let path = path.clone();
-                    let bytes = match assets.file(&path) {
+                    let packed = path.strip_prefix(MAP_PREFIX).map(|p| self.map_files.files.get(p).cloned());
+                    let bytes = match packed.map(|b| b.map_or(Asset::Missing, Asset::Ready)).unwrap_or_else(|| assets.file(&path)) {
                         Asset::Loading => return true,
                         Asset::Missing => {
                             self.models[mi].state =
@@ -594,6 +685,14 @@ impl ModelRenderer {
                 self.models[mi].state = ModelState::Failed { at: now, why: "file not found".into() };
                 return false;
             };
+            if let Some(p) = c.strip_prefix(MAP_PREFIX) {
+                if self.map_files.files.contains_key(p) {
+                    self.models[mi].state = ModelState::Loading { path: c };
+                    return false;
+                }
+                *next += 1;
+                continue;
+            }
             let path = match c.strip_prefix("@resolve:") {
                 Some(p) => match assets.resolve(p) {
                     Some(r) => r,
@@ -727,6 +826,23 @@ impl ModelRenderer {
                 *st = TexState::Failed(now);
                 return false;
             };
+            if let Some(p) = c.strip_prefix(MAP_PREFIX) {
+                match self.map_files.texture(p) {
+                    Some(img) => {
+                        let id = self.next_tex;
+                        self.next_tex += 1;
+                        uploads.push(TextureUpload { id, image: img });
+                        self.textures[t].1 = TexState::Ready(id);
+                        return false;
+                    }
+                    None => {
+                        if let TexState::Locating { next, .. } = &mut self.textures[t].1 {
+                            *next += 1;
+                        }
+                        continue;
+                    }
+                }
+            }
             let path = match c.strip_prefix("@resolve:") {
                 Some(p) => match assets.resolve(p) {
                     Some(r) => r,

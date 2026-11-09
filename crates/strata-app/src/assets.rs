@@ -371,6 +371,38 @@ impl Assets {
         r
     }
 
+    /// Whether the install's file index is open (so [`Assets::exists`] answers).
+    pub fn ready(&self) -> bool {
+        lock(&self.inner).phase == Phase::Open
+    }
+
+    /// Is a path as written in game data part of the install: the melee
+    /// mods, or one of `roots` (CASC folders such as
+    /// `campaigns/liberty.sc2campaign` that the map depends on)? `None`
+    /// until the install's index is open, and for kinds of file the index
+    /// doesn't keep (only `.m3` models and `.dds` textures; see
+    /// [`casc_filter`]). Reads nothing but the index.
+    pub fn exists(&self, data_path: &str, roots: &[String]) -> Option<bool> {
+        let lower = data_path.to_ascii_lowercase();
+        if !self.ready() || !(lower.ends_with(".m3") || lower.ends_with(".dds")) {
+            return None;
+        }
+        if self.resolve(data_path).is_some() {
+            return Some(true);
+        }
+        let p = normalize_path(data_path);
+        let g = lock(&self.inner);
+        let find = |store: &Storage<_>| roots.iter().any(|r| store.find(&format!("{r}/base.sc2assets/{p}")).is_some());
+        #[cfg(not(target_arch = "wasm32"))]
+        let found = g.native.as_ref().is_some_and(|n| find(&n.store));
+        #[cfg(target_arch = "wasm32")]
+        let found = {
+            drop(g);
+            web::with_store(|s| find(s)).unwrap_or(false)
+        };
+        Some(found)
+    }
+
     /// The diffuse and normal map of terrain texture `id` (e.g. "Zerus3",
     /// from `CTerrainTex` in the base game's TerrainTexData).
     pub fn terrain_texture(&self, id: &str) -> Asset<TerrainTex> {

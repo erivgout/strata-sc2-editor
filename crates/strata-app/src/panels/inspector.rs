@@ -536,6 +536,7 @@ fn unit_picker(ui: &mut egui::Ui, state: &mut EditorState, tk: &Tokens) {
     let search = &mut state.ui.inspector.unit_search;
     ui.add(egui::TextEdit::singleline(search).hint_text("Search units").desired_width(f32::INFINITY));
     let q = search.to_lowercase();
+    map_unit_list(ui, state, &q);
     if let Some(base) = state.base.clone() {
         base_unit_list(ui, state, &base, &q, tk);
         return;
@@ -573,6 +574,42 @@ fn unit_picker(ui: &mut egui::Ui, state: &mut EditorState, tk: &Tokens) {
         hint(ui, tk, "Resources and neutral objects are placed for the neutral player.");
     }
     hint(ui, tk, "Showing common units. Load game data (Map menu) to list every unit in StarCraft II.");
+}
+
+/// Units this map defines itself (custom units), listed first.
+fn map_unit_list(ui: &mut egui::Ui, state: &mut EditorState, q: &str) {
+    let units: Vec<(String, String)> = state
+        .doc
+        .data
+        .entries
+        .iter()
+        .filter(|e| e.class() == "CUnit" && e.node.attr("default") != Some("1"))
+        .map(|e| {
+            let id = e.id().to_owned();
+            let name = state.doc.strings.get(strata_core::strings::DEFAULT_LOCALE, &format!("Unit/Name/{id}")).unwrap_or(&id).to_owned();
+            (id, name)
+        })
+        .filter(|(id, name)| q.is_empty() || id.to_lowercase().contains(q) || name.to_lowercase().contains(q))
+        .collect();
+    if units.is_empty() {
+        return;
+    }
+    let mut pick = None;
+    egui::CollapsingHeader::new(format!("This map's units ({})", units.len()))
+        .id_salt("map-units")
+        .default_open(true)
+        .show(ui, |ui| {
+            egui::ScrollArea::vertical().id_salt("map-unit-list").max_height(160.0).show(ui, |ui| {
+                for (id, name) in &units {
+                    if ui.selectable_label(state.place_type == *id, name).on_hover_text(id).clicked() {
+                        pick = Some(id.clone());
+                    }
+                }
+            });
+        });
+    if let Some(id) = pick {
+        state.place_type = id;
+    }
 }
 
 type UnitFilter = fn(&BaseUnit) -> bool;

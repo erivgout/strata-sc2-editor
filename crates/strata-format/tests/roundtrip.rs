@@ -274,3 +274,42 @@ fn folder_save_and_load() {
     assert_eq!(save_files(&back).unwrap(), strata_format::read_folder(&dir).unwrap());
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// Folder <-> archive conversion keeps every file, and saving a folder after
+/// removing an imported file deletes it there (and the folder it leaves
+/// empty) without touching files Strata doesn't know about.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn folder_archive_conversion_and_removed_files() {
+    use strata_core::history::{Edit, History, Origin};
+    let dir = std::env::temp_dir().join(format!("strata-format-convert-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let folder = dir.join("Hero.SC2Map");
+    let mut doc = load_files(save_files(&sample_doc()).unwrap()).unwrap();
+    let mut h = History::default();
+    let sound = "Assets/Sounds/Voice/hi there.mp3";
+    h.commit(&mut doc, "Import", Origin::User, Edit::File { path: sound.into(), before: None, after: Some(b"mp3".to_vec()) });
+
+    strata_format::save_folder(&doc, &folder).unwrap();
+    assert_eq!(std::fs::read(folder.join("Assets/Sounds/Voice/hi there.mp3")).unwrap(), b"mp3");
+    std::fs::write(folder.join("notes.txt"), b"mine").unwrap();
+
+    // Folder -> archive -> folder: same files.
+    let from_folder = strata_format::load_path(&folder).unwrap();
+    let archive = dir.join("Hero2.SC2Map");
+    strata_format::save_path(&from_folder, &archive).unwrap();
+    let from_archive = strata_format::load_path(&archive).unwrap();
+    assert_eq!(from_archive.passthrough, from_folder.passthrough);
+    let again = dir.join("Hero3.SC2Map");
+    strata_format::save_folder(&from_archive, &again).unwrap();
+    assert_eq!(strata_format::read_folder(&again).unwrap(), strata_format::read_folder(&folder).unwrap());
+
+    // Removing the import deletes it (and its now-empty folders) on the next save.
+    h.undo(&mut doc);
+    strata_format::save_path(&doc, &folder).unwrap();
+    assert!(!folder.join("Assets/Sounds/Voice/hi there.mp3").exists());
+    assert!(!folder.join("Assets").exists());
+    assert_eq!(std::fs::read(folder.join("notes.txt")).unwrap(), b"mine");
+    assert!(folder.join("MapInfo").is_file());
+    std::fs::remove_dir_all(&dir).unwrap();
+}

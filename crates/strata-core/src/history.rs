@@ -28,6 +28,10 @@ pub enum Edit {
     Data { index: usize, before: Option<CatalogEntry>, after: Option<CatalogEntry> },
     Strings { before: Box<Strings>, after: Box<Strings> },
     Info { before: Box<MapInfo>, after: Box<MapInfo> },
+    /// Add (`before: None`), remove (`after: None`) or replace a file packed
+    /// into the map (an imported model, texture or sound), by its key in
+    /// [`MapDocument::passthrough`].
+    File { path: String, before: Option<Vec<u8>>, after: Option<Vec<u8>> },
     Batch(Vec<Edit>),
 }
 
@@ -99,6 +103,17 @@ impl Edit {
                 doc.info = (**pick(forward, before, after)).clone();
                 doc.dirty.info = true;
             }
+            Edit::File { path, before, after } => match pick(forward, before, after) {
+                Some(bytes) => {
+                    doc.passthrough.insert(path.clone(), bytes.clone());
+                    doc.removed_files.remove(path);
+                }
+                None => {
+                    if doc.passthrough.remove(path).is_some() {
+                        doc.removed_files.insert(path.clone());
+                    }
+                }
+            },
             Edit::Batch(edits) => {
                 if forward {
                     edits.iter().for_each(|e| e.apply(doc, true));
@@ -121,6 +136,8 @@ impl Edit {
             Edit::Data { .. } => d.data = true,
             Edit::Strings { .. } => d.strings = true,
             Edit::Info { .. } => d.info = true,
+            // Packed files are written from `passthrough` on every save.
+            Edit::File { .. } => {}
             Edit::Batch(es) => es.iter().for_each(|e| d.merge(e.dirty())),
         }
         d

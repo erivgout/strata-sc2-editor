@@ -8,6 +8,8 @@ use strata_core::validate::Severity;
 use strata_core::MapDocument;
 
 use crate::commands::{self, Command, CommandPalette, ShortcutsOverlay};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::io::SaveKind;
 use crate::io::{Io, IoEvent, SaveError};
 use crate::panels::{Tab, Viewer};
 use crate::state::{AppAction, EditorState, Mode, ToastKind, Workspace};
@@ -37,6 +39,10 @@ pub struct Settings {
     pub show_welcome: bool,
     /// Release tag the user chose to skip (desktop updater).
     pub skipped_update: Option<String>,
+    /// Layouts saved before the Assets panel existed get it once (see
+    /// [`Settings::migrate`]). Missing in old settings, so `false` there.
+    #[serde(default)]
+    assets_panel_added: bool,
 }
 
 impl Default for Settings {
@@ -50,6 +56,7 @@ impl Default for Settings {
             recent_commands: Vec::new(),
             show_welcome: true,
             skipped_update: None,
+            assets_panel_added: true,
         }
     }
 }
@@ -59,6 +66,18 @@ impl Settings {
     fn migrate(mut self) -> Self {
         if let Some(dock) = self.legacy_dock.take() {
             self.docks.map = dock;
+        }
+        if !self.assets_panel_added {
+            self.assets_panel_added = true;
+            for ws in [Workspace::Map, Workspace::Data] {
+                let dock = self.docks.get_mut(ws);
+                if dock.find_tab(&Tab::Assets).is_some() {
+                    continue;
+                }
+                let Some(near) = [Tab::Strings, Tab::Data].iter().find_map(|t| dock.find_tab(t)) else { continue };
+                dock.set_focused_node_and_surface(near.node_path());
+                dock.push_to_focused_leaf(Tab::Assets);
+            }
         }
         self
     }
@@ -165,6 +184,7 @@ pub fn default_dock(ws: Workspace) -> DockState<Tab> {
                     Tab::Script,
                     Tab::Triggers,
                     Tab::Data,
+                    Tab::Assets,
                     Tab::Strings,
                 ],
             );
@@ -176,7 +196,7 @@ pub fn default_dock(ws: Workspace) -> DockState<Tab> {
             surface.split_below(right, 0.62, vec![Tab::Problems, Tab::History]);
         }
         Workspace::Data => {
-            surface.split_below(root, 0.70, vec![Tab::Strings, Tab::Problems, Tab::History]);
+            surface.split_below(root, 0.70, vec![Tab::Assets, Tab::Strings, Tab::Problems, Tab::History]);
         }
         Workspace::Text => {
             surface.split_below(root, 0.76, vec![Tab::Problems, Tab::History]);
@@ -354,13 +374,19 @@ impl StrataApp {
             crate::updater::clean_up_old();
             app.updater.check(&cc.egui_ctx, false);
         }
-        // STRATA_OPEN=<map>: open a map on start (native; used to check
-        // rendering against real maps).
+        // A map named on the command line (double-clicking an .SC2Map, or
+        // Open in Strata on a map folder), or STRATA_OPEN=<map> (used to
+        // check rendering against real maps).
         #[cfg(not(target_arch = "wasm32"))]
-        let open_on_start = std::env::var("STRATA_OPEN").ok().map(|path| app.io.open_path(&cc.egui_ctx, path));
-        #[cfg(target_arch = "wasm32")]
-        let open_on_start: Option<()> = None;
-        let restored = if open_on_start.is_some() { None } else { crate::io::restore_autosave() };
+        if let Some(path) =
+            std::env::args().nth(1).filter(|a| !a.starts_with("--")).or_else(|| std::env::var("STRATA_OPEN").ok())
+        {
+            app.io.open_path(&cc.egui_ctx, path);
+        }
+        // Unsaved work from last time comes back even when a map was named
+        // on the command line: that map then arrives through the unsaved
+        // changes guard, so double-clicking a map never discards it.
+        let restored = crate::io::restore_autosave();
         if let Some(rec) = restored {
             app.state.load(rec.doc, rec.file_name);
             // Mark the restored map as unsaved so the guard and title show it.
@@ -453,6 +479,16 @@ impl StrataApp {
             }
             Command::Save => self.save(ctx, false),
             Command::SaveAs => self.save(ctx, true),
+            Command::SaveAsFolder => {
+                #[cfg(not(target_arch = "wasm32"))]
+                self.io.save_as_folder(ctx, &self.state.doc, self.state.file_name.as_deref());
+            }
+            Command::ImportAssets => {
+                self.focus_tab(Tab::Assets);
+                self.io.pick_import(ctx, false);
+            }
+            Command::NewCustomUnit => crate::panels::assets::open_new_unit(&mut self.state, None),
+            Command::NewSound => crate::panels::assets::open_new_sound(&mut self.state, Vec::new()),
             Command::ExportProject => {
                 let r =
                     self.io
@@ -562,6 +598,10 @@ impl StrataApp {
                 AppAction::FocusTab(tab) => Command::FocusTab(tab),
                 AppAction::FrameWorld(p) => {
                     crate::panels::viewport::frame_world(&mut self.state, p);
+                    continue;
+                }
+                AppAction::ImportFiles { folder } => {
+                    self.io.pick_import(ctx, folder);
                     continue;
                 }
             };
@@ -781,11 +821,18 @@ impl StrataApp {
                     });
                 }
                 #[cfg(not(target_arch = "wasm32"))]
-                IoEvent::SaveTo { path, project } => {
-                    let r = self.io.write_native(&self.state.doc, &path, project);
-                    self.finish_save(r.map(Some), project);
+                IoEvent::SaveTo { path, kind } => {
+                    let r = self.io.write_native(&self.state.doc, &path, kind);
+                    self.finish_save(r.map(Some), kind == SaveKind::Project);
                 }
-                IoEvent::Cancelled => self.after_save = None,
+                IoEvent::Import(files) => {
+                    self.focus_tab(Tab::Assets);
+                    crate::panels::assets::begin_import(&mut self.state, files);
+                }
+                IoEvent::Cancelled => {
+                    self.after_save = None;
+                    crate::panels::assets::import_cancelled(&mut self.state);
+                }
             }
         }
     }
@@ -829,7 +876,13 @@ impl StrataApp {
 
     fn handle_drops(&mut self, ctx: &egui::Context) {
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
-        if let Some(file) = dropped.into_iter().next() {
+        if dropped.is_empty() {
+            return;
+        }
+        // Models, textures and sounds go into the open map; maps open.
+        if crate::io::is_import_drop(&dropped) {
+            self.io.import_dropped(ctx, dropped);
+        } else if let Some(file) = dropped.into_iter().next() {
             self.io.open_dropped(ctx, file);
         }
     }
@@ -908,6 +961,8 @@ impl StrataApp {
                 ui.separator();
                 self.menu_cmd(ui, Command::Save);
                 self.menu_cmd(ui, Command::SaveAs);
+                #[cfg(not(target_arch = "wasm32"))]
+                self.menu_cmd(ui, Command::SaveAsFolder);
                 self.menu_cmd(ui, Command::ExportProject);
                 #[cfg(not(target_arch = "wasm32"))]
                 {
@@ -998,6 +1053,11 @@ impl StrataApp {
                 );
                 self.menu_cmd(ui, Command::FrameMap);
                 self.menu_cmd(ui, Command::ShowProblems);
+                ui.separator();
+                self.menu_cmd(ui, Command::ImportAssets);
+                self.menu_cmd(ui, Command::NewCustomUnit);
+                self.menu_cmd(ui, Command::NewSound);
+                self.menu_cmd_labeled(ui, "Show assets".into(), Command::FocusTab(Tab::Assets), true);
                 ui.separator();
                 self.menu_cmd(ui, Command::LoadGameData);
                 self.menu_cmd(ui, Command::ConnectAi);
@@ -1706,14 +1766,14 @@ impl StrataApp {
         p.text(
             r.center(),
             egui::Align2::CENTER_CENTER,
-            "Drop to open the map",
+            "Drop to open a map or import files",
             egui::FontId::new(20.0, theme::semibold()),
             t.text,
         );
         p.text(
             r.center() + Vec2::new(0.0, 26.0),
             egui::Align2::CENTER_CENTER,
-            ".SC2Map archives and .strata.json projects",
+            "Maps (.SC2Map files and folders, .strata.json) open; models, textures and sounds go into this map",
             egui::FontId::proportional(14.0),
             t.text_dim,
         );
@@ -1738,7 +1798,10 @@ impl eframe::App for StrataApp {
         }
         self.handle_drops(&ctx);
 
-        let blocked = self.palette.is_open() || self.dialog.is_some() || self.shortcuts.open;
+        let blocked = self.palette.is_open()
+            || self.dialog.is_some()
+            || self.shortcuts.open
+            || self.state.ui.assets.dialog_open();
         let mut cmds = commands::handle_shortcuts(&ctx, blocked);
         if blocked {
             // Keyboard toggles still close what they opened.
@@ -1824,6 +1887,7 @@ impl eframe::App for StrataApp {
         }
         self.shortcuts.show(&ctx);
         self.dialogs(&ctx);
+        crate::panels::assets::dialogs(&ctx, &mut self.state);
         self.show_notices(&ctx);
         theme::show_toasts(&ctx, &mut self.state);
         self.drop_overlay(&ctx);
@@ -1887,6 +1951,8 @@ fn reveal_tab(dock: &mut DockState<Tab>, tab: Tab) {
         Tab::Viewport | Tab::Triggers | Tab::Data | Tab::Strings => {
             &[Tab::Viewport, Tab::Triggers, Tab::Data, Tab::Strings]
         }
+        // Beside the Data panel, where its entries live.
+        Tab::Assets => &[Tab::Data, Tab::Strings, Tab::Triggers, Tab::Viewport],
         Tab::Script | Tab::Problems | Tab::History | Tab::Mcp => {
             &[Tab::Problems, Tab::History, Tab::Mcp, Tab::Script]
         }
@@ -2281,6 +2347,22 @@ mod tests {
             self.0.remove(key);
         }
         fn flush(&mut self) {}
+    }
+
+    #[test]
+    fn old_layouts_gain_the_assets_panel_once() {
+        let mut s = Settings { assets_panel_added: false, ..Default::default() };
+        s.docks.map = DockState::new(vec![Tab::Viewport, Tab::Data]);
+        s.docks.data = DockState::new(vec![Tab::Data]);
+        let mut s = s.migrate();
+        assert!(s.docks.map.find_tab(&Tab::Assets).is_some());
+        assert!(s.docks.data.find_tab(&Tab::Assets).is_some());
+        // Closing it afterwards sticks.
+        let found = s.docks.map.find_tab(&Tab::Assets).unwrap();
+        s.docks.map.remove_tab(found);
+        let s = s.migrate();
+        assert!(s.docks.map.find_tab(&Tab::Assets).is_none());
+        assert!(Settings::default().docks.map.find_tab(&Tab::Assets).is_some());
     }
 
     #[test]

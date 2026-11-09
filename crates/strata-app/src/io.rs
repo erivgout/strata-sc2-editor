@@ -13,6 +13,27 @@ use strata_core::MapDocument;
 pub const PROJECT_EXT: &str = ".strata.json";
 const AUTOSAVE_INTERVAL: f64 = 30.0;
 
+/// What a save writes (native; the web downloads archives and projects).
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SaveKind {
+    /// A `.SC2Map` archive file.
+    Archive,
+    /// An unpacked map folder named `*.SC2Map` (the official editor's
+    /// component format).
+    Folder,
+    /// A Strata project (`.strata.json`).
+    Project,
+}
+
+/// Files picked or dropped for importing into the map.
+pub struct ImportFiles {
+    /// (name, bytes): a file name, or a path relative to an imported folder.
+    pub files: Vec<(String, Vec<u8>)>,
+    /// Names of files that aren't models, textures, sounds or fonts.
+    pub skipped: Vec<String>,
+}
+
 /// Results delivered back to the UI thread.
 pub enum IoEvent {
     Opened {
@@ -27,8 +48,10 @@ pub enum IoEvent {
     #[cfg(not(target_arch = "wasm32"))]
     SaveTo {
         path: std::path::PathBuf,
-        project: bool,
+        kind: SaveKind,
     },
+    /// Files to import into the open map.
+    Import(ImportFiles),
     Cancelled,
 }
 
@@ -51,6 +74,10 @@ pub struct Io {
     autosaved_revision: Option<u64>,
     autosave_cleared: bool,
     autosave_warned: bool,
+    /// Native: an autosave being written on a background thread (maps with
+    /// large packed files take seconds to encode).
+    #[cfg(not(target_arch = "wasm32"))]
+    autosave_job: Option<Receiver<Result<(), String>>>,
 }
 
 impl Default for Io {
@@ -66,6 +93,8 @@ impl Default for Io {
             autosaved_revision: None,
             autosave_cleared: false,
             autosave_warned: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            autosave_job: None,
         }
     }
 }
@@ -99,11 +128,26 @@ fn file_name_of(path: &std::path::Path) -> String {
 }
 
 fn open_dialog() -> rfd::AsyncFileDialog {
-    rfd::AsyncFileDialog::new()
-        .set_title("Open map")
-        .add_filter("StarCraft II map or Strata project", &["SC2Map", "json"])
-        .add_filter("StarCraft II map", &["SC2Map"])
-        .add_filter("Strata project", &["json"])
+    let d = rfd::AsyncFileDialog::new().set_title("Open map");
+    // Native: a map folder opens by picking any file in it (the dialog
+    // can't pick folders), such as its ComponentList.SC2Components.
+    #[cfg(not(target_arch = "wasm32"))]
+    let d = d.add_filter("StarCraft II map, map folder or Strata project", &["SC2Map", "SC2Components", "json"]);
+    #[cfg(target_arch = "wasm32")]
+    let d = d.add_filter("StarCraft II map or Strata project", &["SC2Map", "json"]);
+    d.add_filter("StarCraft II map", &["SC2Map"]).add_filter("Strata project", &["json"])
+}
+
+/// The map to open for a picked path: a file inside a map folder (named
+/// `*.SC2Map`) opens that folder; anything else opens as itself.
+#[cfg(not(target_arch = "wasm32"))]
+fn map_root(path: &std::path::Path) -> std::path::PathBuf {
+    let is_map = |p: &std::path::Path| p.file_name().is_some_and(|n| n.to_string_lossy().to_ascii_lowercase().ends_with(".sc2map"));
+    let lower = path.to_string_lossy().to_ascii_lowercase();
+    if path.is_dir() || is_map(path) || lower.ends_with(".json") {
+        return path.to_path_buf();
+    }
+    path.ancestors().skip(1).find(|a| a.is_dir() && is_map(a)).map(|a| a.to_path_buf()).unwrap_or_else(|| path.to_path_buf())
 }
 
 /// Run a future to completion on the current (non-UI) thread.
@@ -126,6 +170,79 @@ fn block_on<F: std::future::Future>(fut: F) -> F::Output {
             Poll::Pending => std::thread::park(),
         }
     }
+}
+
+/// Every model, texture, sound and font under `root`, named by their path
+/// relative to it (`Voices/hello.mp3`).
+#[cfg(not(target_arch = "wasm32"))]
+fn collect_folder(root: &std::path::Path, out: &mut ImportFiles) {
+    fn walk(dir: &std::path::Path, prefix: &str, out: &mut ImportFiles, budget: &mut usize) {
+        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        let mut entries: Vec<_> = rd.flatten().collect();
+        entries.sort_by_key(|e| e.file_name());
+        for e in entries {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let rel = if prefix.is_empty() { name } else { format!("{prefix}/{name}") };
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, &rel, out, budget);
+            } else if strata_core::map_files::FileKind::of(&rel).is_none() || *budget == 0 {
+                out.skipped.push(rel);
+            } else if let Ok(bytes) = std::fs::read(&p) {
+                *budget = budget.saturating_sub(1);
+                out.files.push((rel, bytes));
+            }
+        }
+    }
+    let mut budget = 5000;
+    walk(root, "", out, &mut budget);
+}
+
+/// Sort one picked or dropped file into `out`.
+fn add_import(out: &mut ImportFiles, name: String, bytes: Vec<u8>) {
+    if strata_core::map_files::FileKind::of(&name).is_some() {
+        out.files.push((name, bytes));
+    } else {
+        out.skipped.push(name);
+    }
+}
+
+/// Should these dropped files be imported into the open map (models,
+/// textures, sounds, or a plain folder of them) rather than opened as a map?
+pub fn is_import_drop(files: &[egui::DroppedFileHandle]) -> bool {
+    files.iter().any(|f| {
+        let path = f.path();
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let lower = name.to_ascii_lowercase();
+        if lower.ends_with(".sc2map") || lower.ends_with(".json") {
+            return false;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if path.is_dir() {
+            return true;
+        }
+        strata_core::map_files::FileKind::of(&name).is_some()
+    })
+}
+
+/// A file name in `dir` for `name` that doesn't clash with an existing
+/// entry of the other kind (a folder when saving a file, a file when
+/// saving a folder): `Map.SC2Map`, else `Map 2.SC2Map`, `Map 3.SC2Map`...
+#[cfg(not(target_arch = "wasm32"))]
+fn free_name(dir: Option<&std::path::Path>, name: String, folder: bool) -> String {
+    let Some(dir) = dir else { return name };
+    let clash = |n: &str| {
+        let p = dir.join(n);
+        if folder { p.is_file() } else { p.is_dir() }
+    };
+    if !clash(&name) {
+        return name;
+    }
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((s, e)) => (s.to_owned(), format!(".{e}")),
+        None => (name.clone(), String::new()),
+    };
+    (2..100).map(|n| format!("{stem} {n}{ext}")).find(|n| !clash(n)).unwrap_or(name)
 }
 
 impl Io {
@@ -154,7 +271,7 @@ impl Io {
         #[cfg(not(target_arch = "wasm32"))]
         self.send_from_worker(ctx, || match block_on(open_dialog().pick_file()) {
             Some(h) => {
-                let path = h.path().to_path_buf();
+                let path = map_root(h.path());
                 let name = file_name_of(&path);
                 match load_native(&path) {
                     Ok(doc) => IoEvent::Opened {
@@ -223,7 +340,8 @@ impl Io {
     /// Native: reopen a recent file by path.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn open_path(&mut self, ctx: &egui::Context, path: String) {
-        let p = std::path::PathBuf::from(&path);
+        let p = map_root(std::path::Path::new(&path));
+        let path = p.display().to_string();
         let name = file_name_of(&p);
         self.busy = Some(format!("Opening {name}…"));
         self.send_from_worker(ctx, move || match load_native(&p) {
@@ -290,6 +408,102 @@ impl Io {
         }
     }
 
+    /// Pick models, textures and sounds to import (or, native, a folder of them).
+    pub fn pick_import(&mut self, ctx: &egui::Context, folder: bool) {
+        const EXTS: [&str; 13] =
+            ["m3", "m3a", "dds", "tga", "png", "jpg", "mp3", "ogg", "wav", "ttf", "otf", "ogv", "SC2Layout"];
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.busy = Some("Choosing files to import…".into());
+            self.send_from_worker(ctx, move || {
+                let mut out = ImportFiles { files: Vec::new(), skipped: Vec::new() };
+                if folder {
+                    match block_on(rfd::AsyncFileDialog::new().set_title("Import a folder of assets").pick_folder()) {
+                        Some(h) => collect_folder(h.path(), &mut out),
+                        None => return IoEvent::Cancelled,
+                    }
+                } else {
+                    let dialog = rfd::AsyncFileDialog::new()
+                        .set_title("Import models, textures and sounds")
+                        .add_filter("Models, textures and sounds", &EXTS)
+                        .add_filter("All files", &["*"]);
+                    let Some(handles) = block_on(dialog.pick_files()) else { return IoEvent::Cancelled };
+                    for h in handles {
+                        match std::fs::read(h.path()) {
+                            Ok(b) => add_import(&mut out, file_name_of(h.path()), b),
+                            Err(_) => out.skipped.push(file_name_of(h.path())),
+                        }
+                    }
+                }
+                IoEvent::Import(out)
+            });
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = folder;
+            let tx = self.tx.clone();
+            let ctx = ctx.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                let dialog = rfd::AsyncFileDialog::new()
+                    .set_title("Import models, textures and sounds")
+                    .add_filter("Models, textures and sounds", &EXTS);
+                let ev = match dialog.pick_files().await {
+                    Some(handles) => {
+                        let mut out = ImportFiles { files: Vec::new(), skipped: Vec::new() };
+                        for h in handles {
+                            let name = h.file_name();
+                            let bytes = h.read().await;
+                            add_import(&mut out, name, bytes);
+                        }
+                        IoEvent::Import(out)
+                    }
+                    None => IoEvent::Cancelled,
+                };
+                let _ = tx.send(ev);
+                ctx.request_repaint();
+            });
+        }
+    }
+
+    /// Import files (and, native, folders) dropped onto the window.
+    pub fn import_dropped(&mut self, ctx: &egui::Context, dropped: Vec<egui::DroppedFileHandle>) {
+        self.busy = Some("Reading dropped files…".into());
+        #[cfg(not(target_arch = "wasm32"))]
+        self.send_from_worker(ctx, move || {
+            let mut out = ImportFiles { files: Vec::new(), skipped: Vec::new() };
+            for f in dropped {
+                let p = f.path().to_path_buf();
+                if p.is_dir() {
+                    collect_folder(&p, &mut out);
+                    continue;
+                }
+                let name = file_name_of(&p);
+                match f.bytes() {
+                    Ok(b) => add_import(&mut out, name, b),
+                    Err(_) => out.skipped.push(name),
+                }
+            }
+            IoEvent::Import(out)
+        });
+        #[cfg(target_arch = "wasm32")]
+        {
+            let tx = self.tx.clone();
+            let ctx = ctx.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                let mut out = ImportFiles { files: Vec::new(), skipped: Vec::new() };
+                for f in dropped {
+                    let name = f.path().file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    match f.bytes_async().await {
+                        Ok(b) => add_import(&mut out, name, b),
+                        Err(_) => out.skipped.push(name),
+                    }
+                }
+                let _ = tx.send(IoEvent::Import(out));
+                ctx.request_repaint();
+            });
+        }
+    }
+
     /// Next finished background result, if any.
     pub fn poll(&mut self) -> Option<IoEvent> {
         let ev = self.rx.try_recv().ok()?;
@@ -312,14 +526,17 @@ impl Io {
             match (&self.save_path, save_as) {
                 (Some(path), false) => {
                     let path = path.clone();
-                    let project = path
-                        .to_string_lossy()
-                        .to_ascii_lowercase()
-                        .ends_with(".json");
-                    self.write_native(doc, &path, project).map(Some)
+                    let kind = if path.is_dir() {
+                        SaveKind::Folder
+                    } else if path.to_string_lossy().to_ascii_lowercase().ends_with(".json") {
+                        SaveKind::Project
+                    } else {
+                        SaveKind::Archive
+                    };
+                    self.write_native(doc, &path, kind).map(Some)
                 }
                 _ => {
-                    self.ask_save_path(ctx, doc, file_name, false);
+                    self.ask_save_path(ctx, doc, file_name, SaveKind::Archive);
                     Ok(None)
                 }
             }
@@ -349,7 +566,7 @@ impl Io {
     ) -> Result<Option<String>, SaveError> {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            self.ask_save_path(ctx, doc, file_name, true);
+            self.ask_save_path(ctx, doc, file_name, SaveKind::Project);
             Ok(None)
         }
         #[cfg(target_arch = "wasm32")]
@@ -368,34 +585,32 @@ impl Io {
         }
     }
 
+    /// Native: ask where to save the map as an unpacked map folder.
     #[cfg(not(target_arch = "wasm32"))]
-    fn ask_save_path(
-        &mut self,
-        ctx: &egui::Context,
-        doc: &MapDocument,
-        file_name: Option<&str>,
-        project: bool,
-    ) {
+    pub fn save_as_folder(&mut self, ctx: &egui::Context, doc: &MapDocument, file_name: Option<&str>) {
+        self.ask_save_path(ctx, doc, file_name, SaveKind::Folder);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn ask_save_path(&mut self, ctx: &egui::Context, doc: &MapDocument, file_name: Option<&str>, kind: SaveKind) {
         self.busy = Some("Choosing where to save…".into());
-        let file = if project {
-            project_name(doc, file_name)
-        } else {
-            sc2map_name(doc, file_name)
+        let dir = self.save_path.as_ref().and_then(|p| p.parent()).map(|d| d.to_path_buf());
+        let file = match kind {
+            SaveKind::Project => project_name(doc, file_name),
+            SaveKind::Archive => free_name(dir.as_deref(), sc2map_name(doc, file_name), false),
+            SaveKind::Folder => free_name(dir.as_deref(), sc2map_name(doc, file_name), true),
         };
-        let dir = self
-            .save_path
-            .as_ref()
-            .and_then(|p| p.parent())
-            .map(|d| d.to_path_buf());
         self.send_from_worker(ctx, move || {
-            let dialog = if project {
-                rfd::AsyncFileDialog::new()
-                    .set_title("Export project")
-                    .add_filter("Strata project", &["json"])
-            } else {
-                rfd::AsyncFileDialog::new()
-                    .set_title("Save map as")
-                    .add_filter("StarCraft II map", &["SC2Map"])
+            let dialog = match kind {
+                SaveKind::Project => {
+                    rfd::AsyncFileDialog::new().set_title("Export project").add_filter("Strata project", &["json"])
+                }
+                SaveKind::Archive => rfd::AsyncFileDialog::new()
+                    .set_title("Save map as a .SC2Map file")
+                    .add_filter("StarCraft II map", &["SC2Map"]),
+                SaveKind::Folder => rfd::AsyncFileDialog::new()
+                    .set_title("Save map as a map folder")
+                    .add_filter("StarCraft II map folder", &["SC2Map"]),
             };
             let dialog = dialog.set_file_name(file);
             let dialog = match dir {
@@ -403,42 +618,78 @@ impl Io {
                 None => dialog,
             };
             match block_on(dialog.save_file()) {
-                Some(h) => IoEvent::SaveTo {
-                    path: h.path().to_path_buf(),
-                    project,
-                },
+                Some(h) => IoEvent::SaveTo { path: h.path().to_path_buf(), kind },
                 None => IoEvent::Cancelled,
             }
         });
     }
 
-    /// Native: write `doc` to `path` now. Remembers `.SC2Map` paths for Save.
+    /// Native: write `doc` to `path` now. Remembers map paths (files and
+    /// folders) for Save.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn write_native(
         &mut self,
         doc: &MapDocument,
         path: &std::path::Path,
-        project: bool,
+        kind: SaveKind,
     ) -> Result<String, SaveError> {
         let name = file_name_of(path);
-        if project {
-            let bytes = serde_json::to_vec(doc).map_err(|e| SaveError {
-                message: format!("Could not export the project: {e}."),
-                offer_export: false,
-            })?;
-            std::fs::write(path, bytes).map_err(|e| SaveError {
-                message: format!(
-                    "Could not write {name}: {e}. Check that the folder exists and is writable."
-                ),
-                offer_export: false,
-            })?;
-        } else {
-            strata_format::save_path(doc, path).map_err(|e| SaveError {
-                message: format!("Strata could not write {name}: {e}."),
-                offer_export: true,
-            })?;
-            self.save_path = Some(path.to_path_buf());
+        let fail = |message: String, offer_export: bool| SaveError { message, offer_export };
+        match kind {
+            SaveKind::Project => {
+                let bytes =
+                    serde_json::to_vec(doc).map_err(|e| fail(format!("Could not export the project: {e}."), false))?;
+                std::fs::write(path, bytes).map_err(|e| {
+                    fail(format!("Could not write {name}: {e}. Check that the folder exists and is writable."), false)
+                })?;
+                return Ok(name);
+            }
+            SaveKind::Archive => {
+                if path.is_dir() {
+                    return Err(fail(
+                        format!(
+                            "There is already a map folder named {name} there. Choose another name, or use Save to update that folder."
+                        ),
+                        false,
+                    ));
+                }
+                strata_format::save_path(doc, path)
+                    .map_err(|e| fail(format!("Strata could not write {name}: {e}."), true))?;
+            }
+            SaveKind::Folder => {
+                let current = self.save_path.as_deref() == Some(path);
+                if path.is_file() {
+                    // The save dialog already asked to replace the file:
+                    // write the folder beside it first, then swap.
+                    let tmp = path.with_extension("SC2Map.strata-tmp");
+                    let _ = std::fs::remove_dir_all(&tmp);
+                    strata_format::save_folder(doc, &tmp).map_err(|e| {
+                        let _ = std::fs::remove_dir_all(&tmp);
+                        fail(format!("Strata could not write {name}: {e}."), true)
+                    })?;
+                    std::fs::remove_file(path).and_then(|()| std::fs::rename(&tmp, path)).map_err(|e| {
+                        fail(
+                            format!("Strata wrote the map folder to {} but couldn't replace {name} ({e}).", tmp.display()),
+                            false,
+                        )
+                    })?;
+                } else {
+                    let occupied =
+                        path.is_dir() && std::fs::read_dir(path).map(|mut d| d.next().is_some()).unwrap_or(false);
+                    if occupied && !current {
+                        return Err(fail(
+                            format!(
+                                "{name} already exists and isn't the map you have open. Choose another name, or delete that folder first."
+                            ),
+                            false,
+                        ));
+                    }
+                    strata_format::save_folder(doc, path)
+                        .map_err(|e| fail(format!("Strata could not write {name}: {e}."), true))?;
+                }
+            }
         }
+        self.save_path = Some(path.to_path_buf());
         Ok(name)
     }
 
@@ -473,6 +724,25 @@ impl Io {
         file_name: Option<&str>,
     ) -> Option<String> {
         let now = ctx.input(|i| i.time);
+        #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
+        let mut warning = None;
+        // A write still running finishes before the autosave is cleared or
+        // written again, so a late write can never resurrect a cleared one.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(job) = &self.autosave_job {
+            match job.try_recv() {
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(500));
+                    return None;
+                }
+                Ok(Err(e)) if !self.autosave_warned => {
+                    self.autosave_warned = true;
+                    warning = Some(e);
+                }
+                _ => {}
+            }
+            self.autosave_job = None;
+        }
         if !modified {
             if !self.autosave_cleared {
                 clear_autosave();
@@ -480,23 +750,36 @@ impl Io {
                 self.autosaved_revision = Some(revision);
             }
             self.last_autosave = now;
-            return None;
+            return warning;
         }
         self.autosave_cleared = false;
         if now - self.last_autosave < AUTOSAVE_INTERVAL || self.autosaved_revision == Some(revision)
         {
             ctx.request_repaint_after(std::time::Duration::from_secs_f64(AUTOSAVE_INTERVAL));
-            return None;
+            return warning;
         }
         self.last_autosave = now;
         self.autosaved_revision = Some(revision);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let (doc, name) = (Box::new(doc.clone()), file_name.map(str::to_owned));
+            let (tx, rx) = channel();
+            let ctx = ctx.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(write_autosave(&doc, name.as_deref()));
+                ctx.request_repaint();
+            });
+            self.autosave_job = Some(rx);
+            warning
+        }
+        #[cfg(target_arch = "wasm32")]
         match write_autosave(doc, file_name) {
-            Ok(()) => None,
+            Ok(()) => warning,
             Err(e) if !self.autosave_warned => {
                 self.autosave_warned = true;
                 Some(e)
             }
-            Err(_) => None,
+            Err(_) => warning,
         }
     }
 
@@ -814,6 +1097,22 @@ pub fn set_title(ctx: &egui::Context, title: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn files_inside_a_map_folder_open_the_folder() {
+        let dir = std::env::temp_dir().join(format!("strata-map-root-{}", std::process::id()));
+        let map = dir.join("Hero.SC2Map");
+        std::fs::create_dir_all(map.join("Base.SC2Data")).unwrap();
+        std::fs::write(map.join("ComponentList.SC2Components"), b"x").unwrap();
+        std::fs::write(map.join("Base.SC2Data").join("x.xml"), b"x").unwrap();
+        std::fs::write(dir.join("loose.txt"), b"x").unwrap();
+        assert_eq!(map_root(&map.join("ComponentList.SC2Components")), map);
+        assert_eq!(map_root(&map.join("Base.SC2Data").join("x.xml")), map);
+        assert_eq!(map_root(&map), map);
+        assert_eq!(map_root(&dir.join("loose.txt")), dir.join("loose.txt"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn base64_round_trip() {

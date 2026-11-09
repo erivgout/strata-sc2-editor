@@ -66,6 +66,13 @@ def png(size, maskable=False):
     return img.resize((size, size), Image.LANCZOS)
 
 
+def ico(path):
+    """Windows icon (exe, shortcuts, file types): each size drawn on its own."""
+    sizes = [16, 20, 24, 32, 40, 48, 64, 128, 256]
+    imgs = [png(s) for s in sizes]
+    imgs[-1].save(path, format="ICO", sizes=[(s, s) for s in sizes], append_images=imgs[:-1])
+
+
 def main():
     out = Path(sys.argv[1])
     out.mkdir(parents=True, exist_ok=True)
@@ -74,6 +81,7 @@ def main():
     for s in (32, 180, 192, 512):
         png(s).save(out / f"icon-{s}.png", optimize=True)
     png(512, maskable=True).save(out / "icon-maskable-512.png", optimize=True)
+    ico(out / "icon.ico")
 
 
 if __name__ == "__main__":

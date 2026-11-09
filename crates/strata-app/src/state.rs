@@ -164,6 +164,8 @@ pub enum AppAction {
     FocusTab(panels::Tab),
     /// Center the viewport on a world position.
     FrameWorld(glam::Vec2),
+    /// Pick files (or a folder) to import into the map.
+    ImportFiles { folder: bool },
 }
 
 /// UI-only state owned by each panel module.
@@ -175,6 +177,7 @@ pub struct PanelStates {
     pub triggers: panels::triggers::TriggersState,
     pub script: panels::script::ScriptState,
     pub data: panels::data::DataState,
+    pub assets: panels::assets::AssetsState,
     pub strings: panels::strings::StringsState,
     pub map_props: panels::map_props::MapPropsState,
     pub problems: panels::problems::ProblemsState,

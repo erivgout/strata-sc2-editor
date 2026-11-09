@@ -18,8 +18,16 @@ pub enum Command {
     OpenFolder,
     Save,
     SaveAs,
+    /// Native only: save as an unpacked map folder (component format).
+    SaveAsFolder,
     ExportProject,
     OpenRecent(String),
+    /// Import models, textures and sounds into the map.
+    ImportAssets,
+    /// Make a unit with its own model, icon and voice.
+    NewCustomUnit,
+    /// Make a sound from audio files in the map.
+    NewSound,
     Undo,
     Redo,
     OpenPalette,
@@ -89,7 +97,11 @@ impl Command {
             Command::OpenMap => "Open map…".into(),
             Command::OpenFolder => "Open map folder…".into(),
             Command::Save => "Save map".into(),
-            Command::SaveAs => "Save map as…".into(),
+            Command::SaveAs => "Save map as .SC2Map file…".into(),
+            Command::SaveAsFolder => "Save map as folder…".into(),
+            Command::ImportAssets => "Import models, textures and sounds…".into(),
+            Command::NewCustomUnit => "New custom unit…".into(),
+            Command::NewSound => "New sound…".into(),
             Command::ExportProject => "Export project (.strata.json)".into(),
             Command::OpenRecent(p) => format!("Open {}", display_name(p)),
             Command::Undo => "Undo".into(),
@@ -124,8 +136,10 @@ impl Command {
             | Command::OpenFolder
             | Command::Save
             | Command::SaveAs
+            | Command::SaveAsFolder
             | Command::ExportProject
             | Command::OpenRecent(_) => "File",
+            Command::ImportAssets | Command::NewCustomUnit | Command::NewSound => "Assets",
             Command::Undo | Command::Redo => "Edit",
             Command::SetMode(_) => "Mode",
             Command::Workspace(_) => "Workspace",
@@ -151,6 +165,12 @@ impl Command {
             Command::OpenMap => "load import sc2map file",
             Command::OpenFolder => "load directory unpacked",
             Command::Save => "write sc2map",
+            Command::SaveAs => "write sc2map archive file convert",
+            Command::SaveAsFolder => "write components component list directory unpacked convert",
+            Command::ImportAssets => "import add custom model m3 texture dds sound mp3 ogg wav audio asset file",
+            Command::NewCustomUnit => "create custom unit hero model portrait icon voice",
+            Command::NewSound => "create custom sound audio voice mp3 ogg wav",
+            Command::FocusTab(Tab::Assets) => "imports files models textures sounds custom",
             Command::ExportProject => "json backup download",
             Command::OpenRecent(_) => "recent history",
             Command::Undo => "revert back",
@@ -224,7 +244,12 @@ pub fn all(cx: &Context<'_>) -> Vec<Command> {
     if cfg!(not(target_arch = "wasm32")) {
         v.push(Command::OpenFolder);
     }
-    v.extend([Command::Save, Command::SaveAs, Command::ExportProject]);
+    v.extend([Command::Save, Command::SaveAs]);
+    if cfg!(not(target_arch = "wasm32")) {
+        v.push(Command::SaveAsFolder);
+    }
+    v.push(Command::ExportProject);
+    v.extend([Command::ImportAssets, Command::NewCustomUnit, Command::NewSound]);
     v.extend(cx.recent_files.iter().cloned().map(Command::OpenRecent));
     v.extend([Command::Undo, Command::Redo]);
     v.extend(Workspace::ALL.map(Command::Workspace));

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -180,6 +180,10 @@ pub struct MapDocument {
     pub passthrough: BTreeMap<String, Vec<u8>>,
     /// Components changed since load; drives what the saver regenerates.
     pub dirty: DirtyFlags,
+    /// Packed files removed since load (see [`crate::history::Edit::File`]),
+    /// so saving into a map folder can delete them there too.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub removed_files: BTreeSet<String>,
 }
 
 impl MapDocument {
@@ -199,6 +203,7 @@ impl MapDocument {
             strings,
             passthrough: BTreeMap::new(),
             dirty: DirtyFlags::all(),
+            removed_files: BTreeSet::new(),
         }
     }
 

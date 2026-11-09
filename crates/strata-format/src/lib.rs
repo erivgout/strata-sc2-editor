@@ -40,7 +40,7 @@
 //!
 //! API contract used by the app and `strata-mcp` (keep these signatures stable):
 //! [`load_files`], [`save_files`], [`load_sc2map`], [`save_sc2map`], and on
-//! native targets [`load_path`] / [`save_path`].
+//! native targets [`load_path`] / [`save_path`] / [`save_folder`].
 
 use std::collections::BTreeMap;
 
@@ -207,6 +207,7 @@ pub fn load_files(files: FileMap) -> Result<MapDocument, FormatError> {
         strings,
         passthrough: files,
         dirty: DirtyFlags::default(),
+        removed_files: Default::default(),
     })
 }
 
@@ -525,23 +526,63 @@ pub fn read_folder(root: &std::path::Path) -> Result<FileMap, FormatError> {
     Ok(out)
 }
 
+/// `root` joined with a `/`-separated map path, refusing anything that could
+/// escape the folder.
+#[cfg(not(target_arch = "wasm32"))]
+fn folder_path(root: &std::path::Path, name: &str) -> Result<std::path::PathBuf, FormatError> {
+    let mut p = root.to_path_buf();
+    for part in name.split(['/', '\\']) {
+        if part.is_empty() || part == "." || part == ".." || part.contains(':') {
+            return Err(FormatError::Io(format!("refusing unsafe path {name:?}")));
+        }
+        p.push(part);
+    }
+    Ok(p)
+}
+
 /// Write a file set into a folder (creating subfolders). Existing files that
 /// are not in `files` are left alone.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn write_folder(root: &std::path::Path, files: &FileMap) -> Result<(), FormatError> {
     for (name, data) in files {
-        let mut p = root.to_path_buf();
-        for part in name.split(['/', '\\']) {
-            if part.is_empty() || part == "." || part == ".." {
-                return Err(FormatError::Io(format!("refusing unsafe path {name:?}")));
-            }
-            p.push(part);
-        }
+        let p = folder_path(root, name)?;
         if let Some(parent) = p.parent() {
             std::fs::create_dir_all(parent).map_err(|e| io(e, parent))?;
         }
         if std::fs::read(&p).ok().as_deref() != Some(data.as_slice()) {
             std::fs::write(&p, data).map_err(|e| io(e, &p))?;
+        }
+    }
+    Ok(())
+}
+
+/// Save into an unpacked map folder (what the official editor calls the
+/// component format), creating it if needed. Packed files removed in the
+/// editor ([`MapDocument::removed_files`]) are deleted from the folder too,
+/// along with folders that leaves empty; any other file already in the folder
+/// is left alone.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn save_folder(doc: &MapDocument, root: &std::path::Path) -> Result<(), FormatError> {
+    let files = save_files(doc)?;
+    std::fs::create_dir_all(root).map_err(|e| io(e, root))?;
+    write_folder(root, &files)?;
+    for name in &doc.removed_files {
+        if lookup(&files, name).is_some() {
+            continue;
+        }
+        let p = folder_path(root, name)?;
+        match std::fs::remove_file(&p) {
+            Ok(()) => {
+                let mut dir = p.parent();
+                while let Some(d) = dir.filter(|d| *d != root && d.starts_with(root)) {
+                    if std::fs::remove_dir(d).is_err() {
+                        break; // not empty
+                    }
+                    dir = d.parent();
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(io(e, &p)),
         }
     }
     Ok(())
@@ -557,11 +598,12 @@ pub fn load_path(path: &std::path::Path) -> Result<MapDocument, FormatError> {
     }
 }
 
-/// Save as an archive, or as a folder if `path` is an existing directory.
+/// Save as an archive, or as a folder if `path` is an existing directory
+/// (see [`save_folder`]).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn save_path(doc: &MapDocument, path: &std::path::Path) -> Result<(), FormatError> {
     if path.is_dir() {
-        return write_folder(path, &save_files(doc)?);
+        return save_folder(doc, path);
     }
     let bytes = save_sc2map(doc)?;
     let tmp = path.with_extension("SC2Map.strata-tmp");

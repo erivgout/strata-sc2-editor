@@ -1,6 +1,7 @@
 //! Dockable panels. Each module exposes `XState` (UI-only state, stored in
 //! `EditorState::ui`) and `show(ui, state)`.
 
+pub mod assets;
 pub mod data;
 pub mod history;
 pub mod inspector;
@@ -23,6 +24,7 @@ pub enum Tab {
     Triggers,
     Script,
     Data,
+    Assets,
     Strings,
     MapProps,
     Problems,
@@ -31,13 +33,14 @@ pub enum Tab {
 }
 
 impl Tab {
-    pub const ALL: [Tab; 11] = [
+    pub const ALL: [Tab; 12] = [
         Tab::Viewport,
         Tab::Inspector,
         Tab::Minimap,
         Tab::Triggers,
         Tab::Script,
         Tab::Data,
+        Tab::Assets,
         Tab::Strings,
         Tab::MapProps,
         Tab::Problems,
@@ -53,6 +56,7 @@ impl Tab {
             Tab::Triggers => "Triggers",
             Tab::Script => "Script",
             Tab::Data => "Data",
+            Tab::Assets => "Assets",
             Tab::Strings => "Text",
             Tab::MapProps => "Map properties",
             Tab::Problems => "Problems",
@@ -69,6 +73,7 @@ impl Tab {
             Tab::Triggers => triggers::show(ui, state),
             Tab::Script => script::show(ui, state),
             Tab::Data => data::show(ui, state),
+            Tab::Assets => assets::show(ui, state),
             Tab::Strings => strings::show(ui, state),
             Tab::MapProps => map_props::show(ui, state),
             Tab::Problems => problems::show(ui, state),

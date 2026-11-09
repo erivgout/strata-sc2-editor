@@ -2,8 +2,12 @@
 
 mod app;
 mod assets;
+#[cfg(not(target_arch = "wasm32"))]
+mod audio;
 mod commands;
 mod game_data;
+#[cfg(windows)]
+mod install;
 mod io;
 mod mcp_link;
 mod panels;
@@ -21,6 +25,8 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
     env_logger::init();
+    #[cfg(windows)]
+    install::refresh_record();
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("Strata")
         .with_app_id("strata")

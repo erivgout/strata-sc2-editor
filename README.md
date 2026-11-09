@@ -20,14 +20,26 @@ the official Galaxy Editor, and that AI assistants can drive through MCP.
 | Layout | Separate module windows | Dockable panels around the map; triggers never hide the map |
 | Undo | Per editor module | One history for every change, including edits made by AI clients |
 | AI assistants | None | Built-in MCP server, plus a live link that applies AI edits in the open editor (undoable, labeled AI) |
-| File format | SC2Map archives and folders | Same files, written back losslessly; plus a JSON project format |
+| File format | SC2Map archives and folders | Same files, written back losslessly; convert either way with Save as; plus a JSON project format |
+| Custom assets | Import module, then wire up models, actors and sounds by hand | Drop files on the window; textures land where their models expect them; a custom unit (model, portrait, icon, voice) in one dialog |
 
 What works today:
 
-- Real maps: opens `.SC2Map` archives and folder maps, and writes them back
-  byte-for-byte unless you changed something. Verified in StarCraft II
-  (build 98310): a map made from scratch in Strata, a real map saved
-  unchanged, and edited real maps all load and play.
+- Real maps: opens `.SC2Map` archives and folder maps (the official
+  editor's component format), and writes them back byte-for-byte unless you
+  changed something. **File › Save map as .SC2Map file** and **Save map as
+  folder** convert between the two. Verified in StarCraft II (build 98310):
+  a map made from scratch in Strata, a real map saved unchanged, and edited
+  real maps all load and play.
+- Custom models, textures and sounds (**Assets** panel): drop files or a
+  folder on the window, or use **Map › Import models, textures and sounds**.
+  Textures go to the path their model looks for, and files the map's data
+  is missing go where the data expects them. The panel shows what uses each
+  file, plays sounds, and lists what's missing (checked against your game
+  install). **New custom unit** makes a unit from any unit's stats with its
+  own model, portrait, icon and voice lines in one step, ready to place;
+  **New sound** turns audio files into a sound for triggers or voices.
+  Custom models draw in the 3D view from the map's own files.
 - Real game data: on desktop Strata reads the base game's units, abilities,
   weapons and names straight from your StarCraft II install (in a browser,
   pick the install folder once). The Data editor shows inherited values,
@@ -56,6 +68,10 @@ What works today:
   unaffected.
 - Archives whose `(listfile)` is missing entries are refused, because their
   unnamed files couldn't be preserved on save.
+- Model animations aren't played: units and doodads show their first pose.
+- On Windows 11, "Open in Strata" for map folders is under **Show more
+  options** in Explorer's context menu. Dropping a map folder on Strata's
+  window or shortcut also opens it.
 
 ## Screenshots
 
@@ -63,11 +79,20 @@ Screenshots are coming.
 
 ## Download
 
-**Windows:** download `strata-v<version>-windows-x64.exe` from the
+**Windows:** download `strata-v<version>-windows-x64-setup.exe` from the
 [latest release](https://github.com/erivgout/strata-sc2-editor/releases/latest)
-and run it. No installer or Visual C++ runtime is needed. Windows may warn
-that the file is from an unknown publisher (it isn't code-signed yet): choose
-**More info → Run anyway**.
+and run it. It installs Strata for your account (no admin rights) into
+`%LOCALAPPDATA%\Programs\Strata`, adds it to the Start menu and to
+Settings › Apps (where you can uninstall it), lists Strata under **Open
+with** for `.SC2Map` files, and adds **Open in Strata** to map folders. Windows
+keeps the app you already chose for `.SC2Map` files (usually the StarCraft
+II editor); to open maps in Strata on double-click, leave **Choose Strata for
+.SC2Map files** checked at the end of setup and pick Strata in the settings
+page it opens. Windows may warn that the installer is from an unknown
+publisher (it isn't code-signed yet): choose **More info → Run anyway**.
+
+Prefer no installer? `strata-v<version>-windows-x64.exe` is the same app as a
+single file you can run from anywhere.
 
 Strata checks for new versions when it starts (and from **Help → Check for
 updates…**). When one is available it asks first; **Update now** downloads
@@ -78,7 +103,10 @@ update when you restart or quit.
 (see [AI assistants](#ai-assistants-mcp)).
 
 To publish a release: bump `version` in `Cargo.toml`, push to `main`, then
-run `./scripts/release.ps1 -Version <version> -Notes "…"`.
+run `./scripts/release.ps1 -Version <version> -Notes "…"`. It needs
+[Inno Setup 6](https://jrsoftware.org/isinfo.php) for the installer
+(`winget install JRSoftware.InnoSetup --scope user`); the installer script is
+`installer/strata.iss`.
 
 ## Build and run
 
@@ -164,6 +192,8 @@ crates/
     assets/        Fonts, icons, PWA manifest, service worker, web loader
     index.html     Web entry point and loading screen (built with trunk)
   strata-mcp/      MCP server
+installer/         Windows installer (Inno Setup script)
+scripts/           Release script
 docs/DESIGN.md     Design system: tokens, type, layout, principles
 ```
 

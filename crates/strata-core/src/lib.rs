@@ -17,6 +17,8 @@
 //! - [`history`]: undo/redo built on reversible [`history::Edit`]s.
 //! - [`known`]: curated SC2 unit, doodad and texture ids for pickers.
 //! - [`models`]: which `.m3` model draws a placed unit or doodad.
+//! - [`map_files`]: custom models, textures and sounds packed into the map,
+//!   what uses them, importing, and building custom sounds and units.
 //! - [`validate`]: problems shown in the Problems panel.
 
 pub mod base_data;
@@ -27,6 +29,7 @@ pub mod document;
 pub mod galaxy;
 pub mod history;
 pub mod known;
+pub mod map_files;
 pub mod models;
 pub mod objects;
 pub mod ops;
