@@ -19,6 +19,7 @@ mod render;
 mod state;
 mod theme;
 mod tools;
+mod unit_icons;
 #[cfg(not(target_arch = "wasm32"))]
 mod updater;
 

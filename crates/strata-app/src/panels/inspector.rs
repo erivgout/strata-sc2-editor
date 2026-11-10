@@ -28,8 +28,42 @@ pub struct InspectorState {
     pending: Option<Pending>,
     unit_search: String,
     doodad_search: String,
-    /// Base-game unit list: include campaign and story units, not just melee.
-    all_units: bool,
+    unit_filters: UnitFilters,
+    icons: crate::unit_icons::UnitIcons,
+}
+
+/// The unit picker's filters, like the Galaxy Editor's palette: object
+/// family, race and object type. `None` means all.
+#[derive(Debug, Clone, PartialEq)]
+struct UnitFilters {
+    family: Option<String>,
+    race: Option<UnitGroup>,
+    object_type: Option<String>,
+}
+
+impl Default for UnitFilters {
+    fn default() -> Self {
+        // Multiplayer units first; campaign and story units are one pick away.
+        Self { family: Some(MELEE.into()), race: None, object_type: None }
+    }
+}
+
+const MELEE: &str = "Melee";
+
+impl UnitFilters {
+    /// Whether a base-game unit passes the filters and the (lowercase) search.
+    fn keeps(&self, u: &BaseUnit, q: &str) -> bool {
+        let family = match &self.family {
+            // Unnamed melee units are internal variants; they show up when searched.
+            Some(f) if f == MELEE => u.family == MELEE && (u.named || !q.is_empty()),
+            Some(f) => &u.family == f,
+            None => true,
+        };
+        family
+            && self.race.is_none_or(|r| u.race == r)
+            && self.object_type.as_ref().is_none_or(|t| &u.object_type == t)
+            && (q.is_empty() || u.name.to_lowercase().contains(q) || u.id.to_lowercase().contains(q))
+    }
 }
 
 /// Snapshot taken when a property edit starts; committed when it ends.
@@ -183,12 +217,12 @@ fn tool_options(ui: &mut egui::Ui, state: &mut EditorState, edits: &mut Edits, t
             player_picker(ui, state, tk);
             unit_picker(ui, state, tk);
             placement_rotation(ui, state);
-            hint(ui, tk, "Click to place. Hold Shift to keep placing. Shift+wheel or R rotates.");
+            hint(ui, tk, "Click to place; keep clicking to place more. Shift+wheel or R rotates. Esc or Select (1) stops.");
         }
         Mode::Doodads => {
             doodad_picker(ui, state, tk);
             placement_rotation(ui, state);
-            hint(ui, tk, "Click to place. Hold Shift to keep placing.");
+            hint(ui, tk, "Click to place; keep clicking to place more. Esc or Select (1) stops.");
         }
         Mode::Points => {
             ui.horizontal(|ui| {
@@ -533,17 +567,25 @@ fn unit_picker(ui: &mut egui::Ui, state: &mut EditorState, tk: &Tokens) {
         ui.label("Unit type");
         ui.add(egui::TextEdit::singleline(&mut state.place_type).desired_width(f32::INFINITY).hint_text("Any unit id"));
     });
+    let base = state.base.clone();
+    unit_filter_bar(ui, state, base.as_deref());
     let search = &mut state.ui.inspector.unit_search;
     ui.add(egui::TextEdit::singleline(search).hint_text("Search units").desired_width(f32::INFINITY));
     let q = search.to_lowercase();
-    map_unit_list(ui, state, &q);
-    if let Some(base) = state.base.clone() {
-        base_unit_list(ui, state, &base, &q, tk);
+    let mut icons = std::mem::take(&mut state.ui.inspector.icons);
+    map_unit_list(ui, state, &mut icons, &q, tk);
+    if let Some(base) = base {
+        base_unit_list(ui, state, &mut icons, &base, &q, tk);
+        state.ui.inspector.icons = icons;
         return;
     }
+    let race = state.ui.inspector.unit_filters.race;
     let mut pick = None;
-    egui::ScrollArea::vertical().auto_shrink([false, true]).id_salt("unit-list").max_height(260.0).show(ui, |ui| {
+    egui::ScrollArea::vertical().auto_shrink([false, true]).id_salt("unit-list").max_height(320.0).show(ui, |ui| {
         for g in UnitGroup::ALL {
+            if race.is_some_and(|r| r != g) {
+                continue;
+            }
             let items: Vec<_> = g
                 .units()
                 .iter()
@@ -552,14 +594,15 @@ fn unit_picker(ui: &mut egui::Ui, state: &mut EditorState, tk: &Tokens) {
             if items.is_empty() {
                 continue;
             }
-            let open = !q.is_empty() || items.iter().any(|u| u.id == state.place_type);
+            let open = !q.is_empty() || race.is_some() || items.iter().any(|u| u.id == state.place_type);
             egui::CollapsingHeader::new(g.label())
                 .id_salt(("units", g.label()))
                 .open(if q.is_empty() { None } else { Some(true) })
                 .default_open(open)
                 .show(ui, |ui| {
                     for u in items {
-                        let r = ui.selectable_label(state.place_type == u.id, u.name).on_hover_text(u.id);
+                        let r = unit_row(ui, state, &mut icons, u.id, u.name, state.place_type == u.id, tk)
+                            .on_hover_text(u.id);
                         if r.clicked() {
                             pick = Some(u.id);
                         }
@@ -567,24 +610,157 @@ fn unit_picker(ui: &mut egui::Ui, state: &mut EditorState, tk: &Tokens) {
                 });
         }
     });
+    state.ui.inspector.icons = icons;
     if let Some(id) = pick {
         state.place_type = id.into();
     }
     if known::is_neutral_unit(&state.place_type) {
         hint(ui, tk, "Resources and neutral objects are placed for the neutral player.");
     }
-    hint(ui, tk, "Showing common units. Load game data (Map menu) to list every unit in StarCraft II.");
+    hint(ui, tk, "Showing common units. Load game data (Map menu) to list every unit in StarCraft II with its icon.");
+}
+
+/// Object family, race and object type filters above the unit list.
+fn unit_filter_bar(ui: &mut egui::Ui, state: &mut EditorState, base: Option<&BaseCatalog>) {
+    let f = &mut state.ui.inspector.unit_filters;
+    let gap = ui.spacing().item_spacing.x;
+    let half = ((ui.available_width() - gap) / 2.0).max(60.0);
+    let choice = |ui: &mut egui::Ui, id: &str, all: &str, current: &mut Option<String>, values: &[String], tip: &str| {
+        let text = current.clone().unwrap_or_else(|| all.to_owned());
+        egui::ComboBox::from_id_salt(id)
+            .width(half)
+            .selected_text(text)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(current, None, all);
+                for v in values {
+                    ui.selectable_value(current, Some(v.clone()), v.as_str());
+                }
+            })
+            .response
+            .on_hover_text(tip);
+    };
+    ui.horizontal(|ui| {
+        if let Some(base) = base {
+            let families = distinct(base.units().iter().map(|u| u.family.as_str()), Some(MELEE));
+            choice(ui, "unit-family", "All families", &mut f.family, &families, "Object family: Melee (multiplayer), Campaign, Story...");
+        }
+        let text = f.race.map(|r| r.label()).unwrap_or("All races");
+        egui::ComboBox::from_id_salt("unit-race")
+            .width(half)
+            .selected_text(text)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut f.race, None, "All races");
+                for g in UnitGroup::ALL {
+                    ui.selectable_value(&mut f.race, Some(g), g.label());
+                }
+            })
+            .response
+            .on_hover_text("Race");
+    });
+    if let Some(base) = base {
+        ui.horizontal(|ui| {
+            let types = distinct(base.units().iter().map(|u| u.object_type.as_str()), None);
+            choice(ui, "unit-type", "All object types", &mut f.object_type, &types, "Object type: Unit, Structure, Resource, Destructible...");
+            if *f != UnitFilters::default() && ui.small_button("Reset").on_hover_text("Back to multiplayer units of every race and type").clicked() {
+                *f = UnitFilters::default();
+            }
+        });
+    }
+}
+
+/// Distinct non-empty values, sorted, with `first` (if present) at the front.
+fn distinct<'a>(values: impl Iterator<Item = &'a str>, first: Option<&str>) -> Vec<String> {
+    let mut v: Vec<String> = values.filter(|s| !s.is_empty()).map(str::to_owned).collect();
+    v.sort_unstable();
+    v.dedup();
+    if let Some(i) = first.and_then(|f| v.iter().position(|x| x == f)) {
+        let f = v.remove(i);
+        v.insert(0, f);
+    }
+    v
+}
+
+/// One full-width, clickable row: the unit's icon (or a placeholder while it
+/// loads or when it has none) and its name. Icons load only for rows on screen.
+fn unit_row(
+    ui: &mut egui::Ui,
+    state: &EditorState,
+    icons: &mut crate::unit_icons::UnitIcons,
+    id: &str,
+    text: &str,
+    selected: bool,
+    tk: &Tokens,
+) -> egui::Response {
+    const ICON: f32 = 22.0;
+    let height = ICON + 4.0;
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), height), egui::Sense::click());
+    if !ui.is_rect_visible(rect) {
+        return resp;
+    }
+    let vis = ui.style().interact_selectable(&resp, selected);
+    let painter = ui.painter_at(rect);
+    if selected || resp.hovered() || resp.has_focus() {
+        painter.rect_filled(rect, vis.corner_radius, vis.weak_bg_fill);
+    }
+    let icon_rect = egui::Rect::from_min_size(rect.min + egui::vec2(2.0, 2.0), egui::vec2(ICON, ICON));
+    match icons.icon(ui.ctx(), state, id) {
+        Some(tex) => {
+            let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+            painter.image(tex.id(), icon_rect, uv, Color32::WHITE);
+        }
+        None => {
+            painter.rect_filled(icon_rect, 3.0, tk.bg_raised);
+            painter.rect_stroke(icon_rect, 3.0, egui::Stroke::new(1.0, tk.stroke), egui::StrokeKind::Inside);
+        }
+    }
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    painter.text(
+        egui::pos2(icon_rect.right() + 6.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        text,
+        font,
+        vis.text_color(),
+    );
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, text));
+    resp
+}
+
+/// The race a map unit belongs to: its own `Race`, else the base-game unit
+/// it derives from.
+fn map_unit_race(state: &EditorState, index: usize) -> Option<UnitGroup> {
+    let cat = &state.doc.data;
+    let race = cat.resolve_value(index, &strata_core::catalog::FieldKey::new("Race")).map(|(v, _)| v.to_owned());
+    let race = race.or_else(|| {
+        let base = state.base.as_deref()?;
+        let root = cat.external_root(index)?;
+        base.field(CatalogKind::Unit, root, "Race").map(str::to_owned)
+    })?;
+    Some(match race.as_str() {
+        "Terr" => UnitGroup::Terran,
+        "Prot" => UnitGroup::Protoss,
+        "Zerg" => UnitGroup::Zerg,
+        _ => UnitGroup::Neutral,
+    })
 }
 
 /// Units this map defines itself (custom units), listed first.
-fn map_unit_list(ui: &mut egui::Ui, state: &mut EditorState, q: &str) {
+fn map_unit_list(
+    ui: &mut egui::Ui,
+    state: &mut EditorState,
+    icons: &mut crate::unit_icons::UnitIcons,
+    q: &str,
+    tk: &Tokens,
+) {
+    let race = state.ui.inspector.unit_filters.race;
     let units: Vec<(String, String)> = state
         .doc
         .data
         .entries
         .iter()
-        .filter(|e| e.class() == "CUnit" && e.node.attr("default") != Some("1"))
-        .map(|e| {
+        .enumerate()
+        .filter(|(_, e)| e.class() == "CUnit" && e.node.attr("default") != Some("1"))
+        .filter(|(i, _)| race.is_none() || map_unit_race(state, *i) == race)
+        .map(|(_, e)| {
             let id = e.id().to_owned();
             let name = state.doc.strings.get(strata_core::strings::DEFAULT_LOCALE, &format!("Unit/Name/{id}")).unwrap_or(&id).to_owned();
             (id, name)
@@ -599,9 +775,9 @@ fn map_unit_list(ui: &mut egui::Ui, state: &mut EditorState, q: &str) {
         .id_salt("map-units")
         .default_open(true)
         .show(ui, |ui| {
-            egui::ScrollArea::vertical().id_salt("map-unit-list").max_height(160.0).show(ui, |ui| {
+            egui::ScrollArea::vertical().auto_shrink([false, true]).id_salt("map-unit-list").max_height(160.0).show(ui, |ui| {
                 for (id, name) in &units {
-                    if ui.selectable_label(state.place_type == *id, name).on_hover_text(id).clicked() {
+                    if unit_row(ui, state, icons, id, name, state.place_type == *id, tk).on_hover_text(id).clicked() {
                         pick = Some(id.clone());
                     }
                 }
@@ -614,18 +790,18 @@ fn map_unit_list(ui: &mut egui::Ui, state: &mut EditorState, q: &str) {
 
 type UnitFilter = fn(&BaseUnit) -> bool;
 
-/// Every placeable unit of the base game, grouped by race then by kind.
-fn base_unit_list(ui: &mut egui::Ui, state: &mut EditorState, base: &BaseCatalog, q: &str, tk: &Tokens) {
-    ui.checkbox(&mut state.ui.inspector.all_units, "Include campaign units")
-        .on_hover_text("Also list campaign, hero and story-mode units, not just multiplayer ones");
-    let all = state.ui.inspector.all_units;
-    let units: Vec<&BaseUnit> = base
-        .units()
-        .iter()
-        // Unnamed melee units are internal variants; they show up when searched.
-        .filter(|u| all || (u.is_melee() && (u.named || !q.is_empty())) || u.id == state.place_type)
-        .filter(|u| q.is_empty() || u.name.to_lowercase().contains(q) || u.id.to_lowercase().contains(q))
-        .collect();
+/// Every placeable unit of the base game that passes the filters, grouped by
+/// race then by kind.
+fn base_unit_list(
+    ui: &mut egui::Ui,
+    state: &mut EditorState,
+    icons: &mut crate::unit_icons::UnitIcons,
+    base: &BaseCatalog,
+    q: &str,
+    tk: &Tokens,
+) {
+    let filters = state.ui.inspector.unit_filters.clone();
+    let units: Vec<&BaseUnit> = base.units().iter().filter(|u| filters.keeps(u, q)).collect();
     let mut names: HashMap<&str, usize> = HashMap::new();
     for u in &units {
         *names.entry(u.name.as_str()).or_default() += 1;
@@ -635,10 +811,12 @@ fn base_unit_list(ui: &mut egui::Ui, state: &mut EditorState, base: &BaseCatalog
         ("Heroes", |u| u.object_type == "Hero"),
         ("Structures", |u| u.structure),
     ];
+    // Open every group when the filters narrow the list to a few units.
+    let narrowed = !q.is_empty() || filters.race.is_some() || filters.object_type.is_some();
     let mut pick: Option<(String, UnitGroup)> = None;
-    egui::ScrollArea::vertical().id_salt("base-unit-list").max_height(320.0).show(ui, |ui| {
+    egui::ScrollArea::vertical().auto_shrink([false, true]).id_salt("base-unit-list").max_height(360.0).show(ui, |ui| {
         if units.is_empty() {
-            hint(ui, tk, "No units match. Any unit id can still be typed above.");
+            hint(ui, tk, "No units match these filters. Any unit id can still be typed above.");
         }
         for g in UnitGroup::ALL {
             let items: Vec<&BaseUnit> = units.iter().copied().filter(|u| u.race == g).collect();
@@ -648,7 +826,7 @@ fn base_unit_list(ui: &mut egui::Ui, state: &mut EditorState, base: &BaseCatalog
             let open = items.iter().any(|u| u.id == state.place_type);
             egui::CollapsingHeader::new(format!("{}  ({})", g.label(), items.len()))
                 .id_salt(("base-units", g.label()))
-                .open(if q.is_empty() { None } else { Some(true) })
+                .open(if narrowed { Some(true) } else { None })
                 .default_open(open)
                 .show(ui, |ui| {
                     for (label, keep) in sections {
@@ -664,13 +842,15 @@ fn base_unit_list(ui: &mut egui::Ui, state: &mut EditorState, base: &BaseCatalog
                                 u.name.clone()
                             };
                             let tip = format!(
-                                "{} · {}{} · {}.SC2Mod",
+                                "{} · {} · {}{} · {}.SC2Mod",
                                 u.id,
                                 u.object_type,
+                                if u.family.is_empty() { "no family" } else { u.family.as_str() },
                                 if u.air { " · air" } else { "" },
                                 u.source_mod
                             );
-                            if ui.selectable_label(state.place_type == u.id, text).on_hover_text(tip).clicked() {
+                            let r = unit_row(ui, state, icons, &u.id, &text, state.place_type == u.id, tk);
+                            if r.on_hover_text(tip).clicked() {
                                 pick = Some((u.id.clone(), u.race));
                             }
                         }
@@ -1159,7 +1339,84 @@ mod tests {
             s.mode = mode;
             frame(&mut s);
         }
+        s.mode = Mode::Units;
+        s.ui.inspector.unit_search.clear();
+        s.ui.inspector.unit_filters =
+            UnitFilters { family: None, race: Some(UnitGroup::Neutral), object_type: Some("Resource".into()) };
+        frame(&mut s);
         assert_eq!(s.base.as_ref().unwrap().units().len(), 2);
+    }
+
+    fn unit(id: &str, race: UnitGroup, object_type: &str, family: &str, named: bool) -> BaseUnit {
+        BaseUnit {
+            id: id.into(),
+            name: id.into(),
+            race,
+            object_type: object_type.into(),
+            family: family.into(),
+            structure: object_type == "Structure",
+            air: false,
+            radius: 0.5,
+            footprint: None,
+            source_mod: "Liberty".into(),
+            named,
+        }
+    }
+
+    #[test]
+    fn unit_filters_combine() {
+        let marine = unit("Marine", UnitGroup::Terran, "Unit", "Melee", true);
+        let barracks = unit("Barracks", UnitGroup::Terran, "Structure", "Melee", true);
+        let raynor = unit("Raynor", UnitGroup::Terran, "Hero", "Campaign", true);
+        let variant = unit("MarineSkin", UnitGroup::Terran, "Unit", "Melee", false);
+        let rock = unit("Rocks", UnitGroup::Neutral, "Destructible", "Melee", true);
+        let f = UnitFilters::default();
+        assert!(f.keeps(&marine, "") && f.keeps(&barracks, "") && f.keeps(&rock, ""));
+        assert!(!f.keeps(&raynor, ""), "campaign units need the family filter changed");
+        assert!(!f.keeps(&variant, "") && f.keeps(&variant, "skin"), "unnamed variants only when searched");
+
+        let all = UnitFilters { family: None, ..Default::default() };
+        assert!(all.keeps(&raynor, "") && all.keeps(&variant, ""));
+        let campaign = UnitFilters { family: Some("Campaign".into()), ..Default::default() };
+        assert!(campaign.keeps(&raynor, "") && !campaign.keeps(&marine, ""));
+
+        let terran_structures =
+            UnitFilters { race: Some(UnitGroup::Terran), object_type: Some("Structure".into()), ..Default::default() };
+        assert!(terran_structures.keeps(&barracks, "") && !terran_structures.keeps(&marine, ""));
+        assert!(!terran_structures.keeps(&rock, ""));
+        assert!(!f.keeps(&marine, "zealot") && f.keeps(&marine, "mar"));
+
+        assert_eq!(
+            distinct(["Unit", "", "Structure", "Unit", "Melee"].into_iter(), Some("Melee")),
+            vec!["Melee".to_owned(), "Structure".into(), "Unit".into()]
+        );
+    }
+
+    #[test]
+    fn placing_keeps_the_place_tool() {
+        let mut s = EditorState::new(MapDocument::new("t", 32, 32));
+        s.mode = Mode::Units;
+        s.place_type = "Marine".into();
+        let mut tools = crate::tools::ToolState::default();
+        let ctx = egui::Context::default();
+        let view = crate::render::camera::OrbitCamera::default().view(glam::Vec2::new(800.0, 600.0));
+        for x in [10.0, 14.0] {
+            let input = crate::tools::ToolInput {
+                view,
+                rect: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0)),
+                pointer: None,
+                hover: Some(glam::Vec3::new(x, 10.0, 0.0)),
+                pressed: true,
+                down: true,
+                released: false,
+                mods: egui::Modifiers::NONE,
+                dt: 0.016,
+                keys: false,
+            };
+            tools.handle(&ctx, &mut s, &input);
+        }
+        assert_eq!(s.mode, Mode::Units, "still placing after a click");
+        assert_eq!(s.doc.objects.objects.iter().filter(|o| o.type_id == "Marine").count(), 2);
     }
 
     #[test]

@@ -42,9 +42,8 @@ impl ToolState {
         state.selection.objects.insert(id);
         state.selection.region = None;
         state.selection.camera = None;
-        if !input.mods.shift {
-            state.mode = Mode::Select;
-        }
+        // Stay in this mode so the same type can be placed again; Escape or
+        // the Select tool leaves it.
     }
 
     pub(crate) fn place_point_tool(&mut self, state: &mut EditorState, input: &ToolInput) {
