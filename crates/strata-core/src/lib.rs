@@ -19,7 +19,8 @@
 //! - [`models`]: which `.m3` model draws a placed unit or doodad.
 //! - [`map_files`]: custom models, textures and sounds packed into the map,
 //!   what uses them, importing, and building custom sounds and units.
-//! - [`validate`]: problems shown in the Problems panel.
+//! - [`validate`]: problems shown in the Problems panel, and the data reference audit.
+//! - [`png`]: a small PNG encoder for map images.
 
 pub mod base_data;
 pub mod brush;
@@ -32,6 +33,7 @@ pub mod known;
 pub mod map_files;
 pub mod models;
 pub mod objects;
+pub mod png;
 pub mod ops;
 pub mod regions;
 pub mod strings;

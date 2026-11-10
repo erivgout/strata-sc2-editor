@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::base_data::{BaseCatalog, MELEE_MODS};
 use crate::catalog::{CatalogKind, FieldKey};
 use crate::catalog_schema::{self, FieldType};
 use crate::document::MapDocument;
@@ -67,7 +68,24 @@ const AIR_UNITS: &[&str] = &[
 ];
 
 pub fn validate(doc: &MapDocument) -> Vec<Problem> {
+    validate_with(doc, None)
+}
+
+/// [`validate`], plus a reference audit when the base game's data is
+/// loaded: parents, link fields and placed unit and doodad types must name
+/// an entry in the map or the game, not just look plausible. Without it
+/// (or for maps that depend on mods Strata doesn't load) only near-miss
+/// typos are caught, and a note says the check was limited.
+pub fn validate_with(doc: &MapDocument, base: Option<&BaseCatalog>) -> Vec<Problem> {
     let mut out = Vec::new();
+    let refs = References::new(doc, base);
+    if let Some(note) = refs.coverage_note() {
+        out.push(Problem {
+            severity: Severity::Info,
+            message: note,
+            target: Target::Map,
+        });
+    }
     let mut push = |severity, message: String, target| {
         out.push(Problem {
             severity,
@@ -197,6 +215,13 @@ pub fn validate(doc: &MapDocument) -> Vec<Problem> {
                         Target::Object(o.id),
                     );
                 }
+                if let Some(why) = refs.missing(CatalogKind::Unit, &o.type_id) {
+                    push(
+                        Severity::Error,
+                        format!("{} is a \"{}\" unit, which {why}. It won't appear in the game.", o.display_name(), o.type_id),
+                        Target::Object(o.id),
+                    );
+                }
                 if o.player as usize > 15 {
                     push(
                         Severity::Error,
@@ -225,7 +250,15 @@ pub fn validate(doc: &MapDocument) -> Vec<Problem> {
                     *point_names.entry(o.name.as_str()).or_default() += 1;
                 }
             }
-            ObjectKind::Doodad => {}
+            ObjectKind::Doodad => {
+                if let Some(why) = refs.missing(CatalogKind::Actor, &o.type_id) {
+                    push(
+                        Severity::Warning,
+                        format!("Doodad \"{}\" {why}. It won't appear in the game.", o.type_id),
+                        Target::Object(o.id),
+                    );
+                }
+            }
         }
     }
     let mut reported_points = HashSet::new();
@@ -306,7 +339,7 @@ pub fn validate(doc: &MapDocument) -> Vec<Problem> {
         }
     }
 
-    check_catalog(doc, &mut out);
+    check_catalog(doc, &refs, &mut out);
     check_strings(doc, &mut out);
 
     out.sort_by_key(|p| p.severity);
@@ -370,7 +403,86 @@ fn did_you_mean<'a>(id: &str, candidates: impl Iterator<Item = &'a str>) -> Opti
     near
 }
 
-fn check_catalog(doc: &MapDocument, out: &mut Vec<Problem>) {
+/// Map plus game data, for telling whether an id names a real entry.
+struct References<'a> {
+    doc: &'a MapDocument,
+    /// The game's data, when it covers everything the map depends on.
+    base: Option<&'a BaseCatalog>,
+    /// Dependencies beyond the melee mods, which the game data lacks.
+    uncovered: Vec<String>,
+    loaded: bool,
+}
+
+impl<'a> References<'a> {
+    fn new(doc: &'a MapDocument, base: Option<&'a BaseCatalog>) -> Self {
+        let uncovered = extra_dependencies(&doc.info.dependencies);
+        let full = base.filter(|_| uncovered.is_empty());
+        Self { doc, base: full, uncovered, loaded: base.is_some() }
+    }
+
+    /// Why the check was limited, when the map has data that needed it.
+    fn coverage_note(&self) -> Option<String> {
+        if self.base.is_some() || self.doc.data.entries.is_empty() {
+            return None;
+        }
+        if !self.loaded {
+            return Some(
+                "Data references were only checked for typos. Load the game data (from your StarCraft II install) to check that every parent and link exists.".to_owned(),
+            );
+        }
+        Some(format!(
+            "Data references were only checked for typos: this map depends on {}, whose data Strata doesn't load.",
+            self.uncovered.join(", ")
+        ))
+    }
+
+    /// `None` when `id` names an entry of `kind` (or can't be checked);
+    /// otherwise why it's missing, e.g. "isn't in the map or the game's data".
+    fn missing(&self, kind: CatalogKind, id: &str) -> Option<String> {
+        let base = self.base?;
+        if id.is_empty() || is_token(id) || base.find(kind, id).is_some() {
+            return None;
+        }
+        let cat = &self.doc.data;
+        if cat.entries.iter().any(|e| e.kind() == kind && e.id() == id) {
+            return None;
+        }
+        let near = cat
+            .entries
+            .iter()
+            .filter(|e| e.kind() == kind)
+            .map(|e| e.id())
+            .find(|c| c.eq_ignore_ascii_case(id))
+            .or_else(|| base.find_ignore_case(kind, id));
+        Some(match near {
+            Some(n) => format!("isn't in the map or the game's data (did you mean \"{n}\"? Ids are case-sensitive)"),
+            None => "isn't in the map or the game's data".to_owned(),
+        })
+    }
+}
+
+/// Catalog values that are filled in later: `##id##` tokens and parameters.
+fn is_token(v: &str) -> bool {
+    v.contains("##") || v.starts_with('$') || v.contains('{')
+}
+
+/// The map's dependencies that are not one of the melee mods, by file name
+/// (`file:Mods/StarCoop/StarCoop.SC2Mod` -> "StarCoop.SC2Mod").
+pub fn extra_dependencies(deps: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for d in deps {
+        let path = d.rsplit_once("file:").map(|(_, p)| p).unwrap_or(d).trim().replace('\\', "/");
+        let Some(file) = path.rsplit('/').next().filter(|f| !f.is_empty()) else { continue };
+        let lower = path.to_ascii_lowercase();
+        let melee = MELEE_MODS.iter().any(|m| lower == format!("mods/{}.sc2mod", m.to_ascii_lowercase()));
+        if !melee && !out.iter().any(|o| o == file) {
+            out.push(file.to_owned());
+        }
+    }
+    out
+}
+
+fn check_catalog(doc: &MapDocument, refs: &References, out: &mut Vec<Problem>) {
     let cat = &doc.data;
     let target = |e: &crate::catalog::CatalogEntry| Target::Data {
         class: e.class().to_owned(),
@@ -423,7 +535,17 @@ fn check_catalog(doc: &MapDocument, out: &mut Vec<Problem>) {
             } else if cat.parent_of(i).is_none() {
                 let same_kind = by_kind.get(&kind).into_iter().flatten().copied();
                 let base = catalog_schema::base_ids(kind).iter().copied();
-                if let Some(near) = did_you_mean(p, same_kind.chain(base)) {
+                let other_kind = cat.entries.iter().any(|o| o.id() == p && o.kind() != kind);
+                let checked = refs.base.is_some() && !other_kind;
+                if let Some(why) = refs.missing(kind, p).filter(|_| checked) {
+                    out.push(Problem {
+                        severity: Severity::Error,
+                        message: format!("{id}'s parent \"{p}\" {why}. Pick an existing parent."),
+                        target: target(e),
+                    });
+                } else if checked {
+                    // Found in the game's data.
+                } else if let Some(near) = did_you_mean(p, same_kind.chain(base)) {
                     out.push(Problem {
                         severity: Severity::Warning,
                         message: format!("{id}'s parent \"{p}\" was not found. Did you mean \"{near}\"? Ids are case-sensitive."),
@@ -457,6 +579,16 @@ fn check_catalog(doc: &MapDocument, out: &mut Vec<Problem>) {
             else {
                 continue;
             };
+            if refs.base.is_some() {
+                if let Some(why) = refs.missing(link_kind, v) {
+                    out.push(Problem {
+                        severity: Severity::Warning,
+                        message: format!("{id}.{key} links to {} \"{v}\", which {why}.", link_kind.noun()),
+                        target: target(e),
+                    });
+                }
+                continue;
+            }
             let map_ids = by_kind.get(&link_kind).into_iter().flatten().copied();
             let base = catalog_schema::base_ids(link_kind).iter().copied();
             if let Some(near) = did_you_mean(v, map_ids.chain(base)) {
@@ -666,5 +798,83 @@ mod tests {
         assert!(has(&p, "Unit/Name/MyMarine"));
         assert!(!has(&p, "Unit/Name/Marine)"));
         assert!(p.windows(2).all(|w| w[0].severity <= w[1].severity));
+    }
+
+    fn game() -> BaseCatalog {
+        let mut b = BaseCatalog::builder("test");
+        b.begin_mod("Liberty");
+        b.add_catalog(
+            "UnitData.xml",
+            br#"<Catalog><CUnit default="1"/><CUnit id="Marine"/><CUnit id="SiegeTank"/></Catalog>"#,
+        )
+        .unwrap();
+        b.add_catalog(
+            "WeaponData.xml",
+            br#"<Catalog><CWeaponLegacy id="GuassRifle"/></Catalog>"#,
+        )
+        .unwrap();
+        b.add_catalog(
+            "ActorData.xml",
+            br#"<Catalog><CActorDoodad id="AgriaRock"/></Catalog>"#,
+        )
+        .unwrap();
+        b.finish()
+    }
+
+    fn link_node(weapon: &str) -> crate::catalog::XmlNode {
+        let mut n = crate::catalog::XmlNode::new("WeaponArray");
+        n.set_attr("Link", weapon);
+        n
+    }
+
+    fn audit_doc() -> MapDocument {
+        let mut doc = MapDocument::new("Audit", 64, 64);
+        let mut ok = CatalogEntry::new("UnitData", "CUnit", "MyMarine", Some("Marine"));
+        ok.node.children.push(link_node("GuassRifle"));
+        let mut bad = CatalogEntry::new("UnitData", "CUnit", "MyTank", Some("SeigeTank"));
+        bad.node.children.push(link_node("NoSuchGun"));
+        let lower = CatalogEntry::new("UnitData", "CUnit", "MyOther", Some("marine"));
+        doc.data.entries = vec![ok, bad, lower];
+        let mut u = PlacedObject::new(ObjectId(50), ObjectKind::Unit, "Marien", glam::Vec3::new(10.0, 10.0, 0.0));
+        u.player = 1;
+        let d = PlacedObject::new(ObjectId(51), ObjectKind::Doodad, "AgriaRock", glam::Vec3::new(12.0, 12.0, 0.0));
+        let d2 = PlacedObject::new(ObjectId(52), ObjectKind::Doodad, "NotARock", glam::Vec3::new(14.0, 12.0, 0.0));
+        let mine = PlacedObject::new(ObjectId(53), ObjectKind::Unit, "MyMarine", glam::Vec3::new(16.0, 12.0, 0.0));
+        doc.objects.objects.extend([u, d, d2, mine]);
+        doc
+    }
+
+    #[test]
+    fn game_data_turns_typo_checks_into_a_reference_audit() {
+        let doc = audit_doc();
+        let base = game();
+        let p = validate_with(&doc, Some(&base));
+        assert!(has(&p, "MyTank's parent \"SeigeTank\" isn't in the map or the game's data"), "{p:#?}");
+        assert!(has(&p, "links to weapon \"NoSuchGun\""), "{p:#?}");
+        assert!(has(&p, "did you mean \"Marine\""), "{p:#?}");
+        assert!(has(&p, "\"Marien\" unit"), "{p:#?}");
+        assert!(has(&p, "Doodad \"NotARock\""), "{p:#?}");
+        assert!(!has(&p, "GuassRifle"), "{p:#?}");
+        assert!(!has(&p, "\"MyMarine\" unit"), "{p:#?}");
+        assert!(!has(&p, "Doodad \"AgriaRock\""), "{p:#?}");
+        assert!(!has(&p, "only checked for typos"), "{p:#?}");
+
+        // Without game data: no definite claims, and a note says so.
+        let p = validate(&doc);
+        assert!(!has(&p, "isn't in the map or the game's data"), "{p:#?}");
+        assert!(has(&p, "Load the game data"), "{p:#?}");
+    }
+
+    #[test]
+    fn maps_on_other_mods_are_not_audited_against_melee_data() {
+        let mut doc = audit_doc();
+        doc.info.dependencies.push("bnet:Co-op Mission/0.0/999,file:Mods/StarCoop/StarCoop.SC2Mod".into());
+        let p = validate_with(&doc, Some(&game()));
+        assert!(!has(&p, "isn't in the map or the game's data"), "{p:#?}");
+        assert!(has(&p, "depends on StarCoop.SC2Mod"), "{p:#?}");
+        assert_eq!(
+            extra_dependencies(&["bnet:Liberty.SC2Mod/0.0/999,file:Mods/Liberty.SC2Mod".into()]),
+            Vec::<String>::new()
+        );
     }
 }

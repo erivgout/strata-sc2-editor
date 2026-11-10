@@ -178,6 +178,15 @@ impl BaseCatalog {
         self.index.get(&(kind, id.to_owned())).copied()
     }
 
+    /// The id of an entry of `kind` that matches `id` ignoring case.
+    pub fn find_ignore_case(&self, kind: CatalogKind, id: &str) -> Option<&str> {
+        self.entries
+            .iter()
+            .filter(|e| e.kind() == kind && !is_default(e))
+            .map(|e| e.id())
+            .find(|e| e.eq_ignore_ascii_case(id))
+    }
+
     pub fn entry(&self, i: usize) -> Option<&CatalogEntry> {
         self.entries.get(i)
     }

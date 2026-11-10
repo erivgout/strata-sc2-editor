@@ -421,7 +421,7 @@ fn apply(state: &mut EditorState, kind: LinkKind) -> Result<Value, String> {
             link::op_output(&label, result)
         }
         LinkKind::Query(q) => q
-            .run(&state.doc, &state.history)
+            .run_with(&state.doc, &state.history, state.base.as_deref())
             .map_err(|e| e.to_string())?,
         LinkKind::Undo => {
             let label = state

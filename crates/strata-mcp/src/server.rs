@@ -135,6 +135,10 @@ impl Strata {
                 "path": h.path.as_ref().map(|p| p.display().to_string()),
                 "modified": h.history.is_modified(),
             }),
+            LinkKind::Query(q) => {
+                let base = crate::base::get().ok();
+                q.run_with(&h.doc, &h.history, base.as_deref()).map_err(|e| e.to_string())?
+            }
             other => {
                 let Headless { doc, history, .. } = &mut *h;
                 link::execute(other, doc, history)?

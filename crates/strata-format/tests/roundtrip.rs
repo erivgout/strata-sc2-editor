@@ -313,3 +313,45 @@ fn folder_archive_conversion_and_removed_files() {
     assert!(folder.join("MapInfo").is_file());
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn saved_archives_are_checked_against_what_was_written() {
+    let doc = sample_doc();
+    let bytes = strata_format::save_sc2map(&doc).expect("save");
+    let files = save_files(&doc).expect("files");
+    strata_format::verify_sc2map(bytes.clone(), &files).expect("matches");
+
+    let mut changed_file = files.clone();
+    changed_file.insert("Objects".into(), b"<not what was written/>".to_vec());
+    let e = strata_format::verify_sc2map(bytes.clone(), &changed_file).unwrap_err();
+    assert!(e.to_string().contains("Objects"), "{e}");
+
+    let mut extra = files.clone();
+    extra.remove("Objects");
+    let e = strata_format::verify_sc2map(bytes.clone(), &extra).unwrap_err();
+    assert!(e.to_string().contains("files instead of"), "{e}");
+
+    let mut truncated = bytes;
+    truncated.truncate(truncated.len() / 2);
+    assert!(strata_format::verify_sc2map(truncated, &files).is_err());
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn save_path_replaces_the_map_only_after_reading_it_back() {
+    let dir = std::env::temp_dir().join(format!("strata-verify-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("Test.SC2Map");
+    let doc = sample_doc();
+    strata_format::save_path(&doc, &path).expect("save");
+    assert!(!dir.join("Test.SC2Map.strata-tmp").exists());
+    let back = strata_format::load_path(&path).expect("reopen");
+    assert_eq!(back.objects.objects.len(), doc.objects.objects.len());
+
+    let folder = dir.join("Folder.SC2Map");
+    strata_format::save_folder(&doc, &folder).expect("save folder");
+    strata_format::verify_folder(&folder, &save_files(&doc).unwrap()).expect("folder matches");
+    std::fs::write(folder.join("Objects"), b"changed on disk").unwrap();
+    assert!(strata_format::verify_folder(&folder, &save_files(&doc).unwrap()).is_err());
+    let _ = std::fs::remove_dir_all(&dir);
+}

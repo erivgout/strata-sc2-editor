@@ -74,6 +74,10 @@ pub enum FormatError {
     Io(String),
     #[error("unsupported: {0}")]
     Unsupported(String),
+    /// A written map did not read back as what was written. During an
+    /// archive save the original file is left untouched.
+    #[error("the written map did not read back correctly: {0}")]
+    Verify(String),
 }
 
 pub const MAP_INFO: &str = "MapInfo";
@@ -491,11 +495,58 @@ pub fn load_sc2map(bytes: Vec<u8>) -> Result<MapDocument, FormatError> {
 }
 
 pub fn save_sc2map(doc: &MapDocument) -> Result<Vec<u8>, FormatError> {
+    let (bytes, files) = build_sc2map(doc)?;
+    verify_sc2map(bytes.clone(), &files)?;
+    Ok(bytes)
+}
+
+fn build_sc2map(doc: &MapDocument) -> Result<(Vec<u8>, FileMap), FormatError> {
+    let files = save_files(doc)?;
     let mut b = strata_mpq::ArchiveBuilder::new();
-    for (name, data) in save_files(doc)? {
-        b.add(&name, data);
+    for (name, data) in &files {
+        b.add(name, data.clone());
     }
-    Ok(b.build()?)
+    Ok((b.build()?, files))
+}
+
+/// Check that an `.SC2Map` archive holds exactly `files`: it opens, every
+/// file reads back byte-for-byte, and it contains nothing else.
+pub fn verify_sc2map(archive: Vec<u8>, files: &FileMap) -> Result<(), FormatError> {
+    let bad = |m: String| FormatError::Verify(m);
+    let archive = strata_mpq::Archive::from_bytes(archive).map_err(|e| bad(format!("it doesn't open: {e}")))?;
+    for (name, data) in files {
+        match archive.read(name) {
+            Ok(got) if got == *data => {}
+            Ok(got) => return Err(bad(format!("{name} reads back as {} bytes instead of {}", got.len(), data.len()))),
+            Err(e) => return Err(bad(format!("{name} can't be read back: {e}"))),
+        }
+    }
+    let stored = archive.files().into_iter().filter(|n| !is_mpq_internal(n)).count();
+    if stored != files.len() {
+        return Err(bad(format!("it holds {stored} files instead of {}", files.len())));
+    }
+    Ok(())
+}
+
+/// Check that every file of `files` under the folder `root` holds exactly
+/// what was written.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn verify_folder(root: &std::path::Path, files: &FileMap) -> Result<(), FormatError> {
+    for (name, data) in files {
+        let p = folder_path(root, name)?;
+        match std::fs::read(&p) {
+            Ok(got) if got == *data => {}
+            Ok(got) => {
+                return Err(FormatError::Verify(format!(
+                    "{name} reads back as {} bytes instead of {}",
+                    got.len(),
+                    data.len()
+                )))
+            }
+            Err(e) => return Err(FormatError::Verify(format!("{name} can't be read back: {e}"))),
+        }
+    }
+    Ok(())
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -566,6 +617,7 @@ pub fn save_folder(doc: &MapDocument, root: &std::path::Path) -> Result<(), Form
     let files = save_files(doc)?;
     std::fs::create_dir_all(root).map_err(|e| io(e, root))?;
     write_folder(root, &files)?;
+    verify_folder(root, &files)?;
     for name in &doc.removed_files {
         if lookup(&files, name).is_some() {
             continue;
@@ -600,14 +652,23 @@ pub fn load_path(path: &std::path::Path) -> Result<MapDocument, FormatError> {
 
 /// Save as an archive, or as a folder if `path` is an existing directory
 /// (see [`save_folder`]).
+///
+/// An archive is written beside `path` first, read back from disk and
+/// checked against what was meant to be written ([`verify_sc2map`]); only
+/// then does it replace `path`, so a failed save never damages the map.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn save_path(doc: &MapDocument, path: &std::path::Path) -> Result<(), FormatError> {
     if path.is_dir() {
         return save_folder(doc, path);
     }
-    let bytes = save_sc2map(doc)?;
+    let (bytes, files) = build_sc2map(doc)?;
     let tmp = path.with_extension("SC2Map.strata-tmp");
     std::fs::write(&tmp, bytes).map_err(|e| io(e, &tmp))?;
+    let written = std::fs::read(&tmp).map_err(|e| io(e, &tmp));
+    if let Err(e) = written.and_then(|b| verify_sc2map(b, &files)) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
     std::fs::rename(&tmp, path).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
         io(e, path)

@@ -206,7 +206,8 @@ pub struct EditorState {
     pub base: Option<Arc<BaseCatalog>>,
     /// Game assets (textures, models) from the user's install; shared across map loads.
     pub assets: Arc<crate::assets::Assets>,
-    problems: (u64, Vec<Problem>),
+    /// (history revision, game data pointer) the problems were computed at.
+    problems: ((u64, usize), Vec<Problem>),
 }
 
 impl EditorState {
@@ -226,7 +227,7 @@ impl EditorState {
             base: None,
             assets: Arc::default(),
             doc_generation: 0,
-            problems: (u64::MAX, Vec::new()),
+            problems: ((u64::MAX, 0), Vec::new()),
         }
     }
 
@@ -310,9 +311,9 @@ impl EditorState {
 
     /// Validation results, recomputed only when the document changes.
     pub fn problems(&mut self) -> &[Problem] {
-        let rev = self.history.revision();
-        if self.problems.0 != rev {
-            self.problems = (rev, strata_core::validate::validate(&self.doc));
+        let key = (self.history.revision(), self.base.as_ref().map(|b| Arc::as_ptr(b) as usize).unwrap_or(0));
+        if self.problems.0 != key {
+            self.problems = (key, strata_core::validate::validate_with(&self.doc, self.base.as_deref()));
         }
         &self.problems.1
     }

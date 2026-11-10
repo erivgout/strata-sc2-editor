@@ -4,6 +4,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
+use crate::base_data::BaseCatalog;
 use crate::catalog::CatalogKind;
 use crate::document::MapDocument;
 use crate::history::{History, Origin};
@@ -128,9 +129,15 @@ impl Query {
     }
 
     pub fn run(&self, doc: &MapDocument, history: &History) -> Result<Value, OpError> {
+        self.run_with(doc, history, None)
+    }
+
+    /// [`Query::run`] with the base game's data, so `validate` and `summary`
+    /// check data references against it.
+    pub fn run_with(&self, doc: &MapDocument, history: &History, base: Option<&BaseCatalog>) -> Result<Value, OpError> {
         let limit = |l: &Option<usize>| l.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
         Ok(match self {
-            Query::Summary => summary(doc, history),
+            Query::Summary => summary(doc, history, base),
             Query::ListObjects {
                 kind,
                 type_id,
@@ -216,7 +223,7 @@ impl Query {
                 None => json!({"script": crate::galaxy::generate(doc)}),
             },
             Query::Validate => {
-                let problems = crate::validate::validate(doc);
+                let problems = crate::validate::validate_with(doc, base);
                 let count = |s: Severity| problems.iter().filter(|p| p.severity == s).count();
                 json!({
                     "errors": count(Severity::Error),
@@ -368,9 +375,9 @@ fn pathing_names(flags: u8) -> Vec<&'static str> {
     v
 }
 
-fn summary(doc: &MapDocument, history: &History) -> Value {
+fn summary(doc: &MapDocument, history: &History, base: Option<&BaseCatalog>) -> Value {
     let count = |k: ObjectKind| doc.objects.objects.iter().filter(|o| o.kind == k).count();
-    let problems = crate::validate::validate(doc);
+    let problems = crate::validate::validate_with(doc, base);
     let sev = |s: Severity| problems.iter().filter(|p| p.severity == s).count();
     let (lo, hi) = doc.terrain.min_max_height();
     json!({
