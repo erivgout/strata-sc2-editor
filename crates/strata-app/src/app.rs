@@ -291,6 +291,7 @@ enum Dialog {
     NewMap(NewMapForm),
     Unsaved(Then),
     About,
+    ExportImage(crate::export_image::ExportForm),
 }
 
 #[derive(Clone)]
@@ -560,6 +561,10 @@ impl StrataApp {
             }
             Command::InstallApp => crate::io::install(),
             Command::ShowWelcome => self.dialog = Some(Dialog::Welcome),
+            Command::ExportImage => {
+                let form = crate::export_image::ExportForm::new(self.state.selection.region);
+                self.dialog = Some(Dialog::ExportImage(form));
+            }
             Command::About => self.dialog = Some(Dialog::About),
             #[cfg(not(target_arch = "wasm32"))]
             Command::CheckForUpdates => match &self.updater.status {
@@ -848,11 +853,48 @@ impl StrataApp {
                     self.focus_tab(Tab::Assets);
                     crate::panels::assets::begin_import(&mut self.state, files);
                 }
+                IoEvent::ImageSaved(Ok(text)) => self.state.toast(ToastKind::Success, text),
+                IoEvent::ImageSaved(Err(text)) => self.notice(Notice {
+                    key: "export-image",
+                    kind: ToastKind::Error,
+                    text,
+                    actions: vec![("Dismiss", NoticeAction::Dismiss)],
+                }),
                 IoEvent::Cancelled => {
                     self.after_save = None;
                     crate::panels::assets::import_cancelled(&mut self.state);
                 }
             }
+        }
+    }
+
+    /// Pick up a finished map image export and ask where to save it.
+    fn handle_export(&mut self, ctx: &egui::Context) {
+        let done = self.state.ui.viewport.export.as_ref().is_some_and(|j| j.result.is_some());
+        if !done {
+            return;
+        }
+        let Some(job) = self.state.ui.viewport.export.take() else { return };
+        if matches!(self.dialog, Some(Dialog::ExportImage(_))) {
+            self.dialog = None;
+        }
+        match job.result {
+            Some(Ok(img)) => {
+                let mut summary = format!("{} × {} pixels", img.width, img.height);
+                for n in &img.notes {
+                    summary.push_str("; ");
+                    summary.push_str(n);
+                }
+                let name = crate::io::image_name(&self.state.doc, self.state.file_name.as_deref());
+                self.io.save_png(ctx, name, img.png, summary);
+            }
+            Some(Err(text)) => self.notice(Notice {
+                key: "export-image",
+                kind: ToastKind::Error,
+                text,
+                actions: vec![("Dismiss", NoticeAction::Dismiss)],
+            }),
+            None => {}
         }
     }
 
@@ -1074,6 +1116,7 @@ impl StrataApp {
                 self.menu_cmd(ui, Command::ShowProblems);
                 #[cfg(not(target_arch = "wasm32"))]
                 self.menu_cmd(ui, Command::TestMap);
+                self.menu_cmd(ui, Command::ExportImage);
                 ui.separator();
                 self.menu_cmd(ui, Command::ImportAssets);
                 self.menu_cmd(ui, Command::NewCustomUnit);
@@ -1719,6 +1762,11 @@ impl StrataApp {
                     }
                 }
             }
+            Dialog::ExportImage(form) => {
+                if !export_image_dialog(ctx, modal, &mut self.state, form, &t) {
+                    keep = false;
+                }
+            }
             Dialog::About => {
                 let resp = modal.show(ctx, |ui| {
                     ui.set_width(420.0);
@@ -1858,6 +1906,7 @@ impl eframe::App for StrataApp {
         crate::mcp_link::tick(&ctx, &mut self.state);
         self.poll_web(&ctx);
         self.handle_io();
+        self.handle_export(&ctx);
         self.handle_game_data();
         #[cfg(not(target_arch = "wasm32"))]
         self.handle_updates(&ctx);
@@ -2081,6 +2130,147 @@ fn dot(ui: &mut egui::Ui, t: &Tokens) {
 }
 
 /// The one filled-accent button in a dialog: its default action.
+/// The Export map image dialog: choices, then progress while the export
+/// runs. Returns false when the dialog should close (an export it started
+/// keeps running and is picked up by [`StrataApp::handle_export`]).
+fn export_image_dialog(
+    ctx: &egui::Context,
+    modal: egui::Modal,
+    state: &mut EditorState,
+    form: &mut crate::export_image::ExportForm,
+    t: &Tokens,
+) -> bool {
+    use crate::export_image::{area_rect, image_size, Area, ExportJob, WIDTHS};
+    let shared = state.ui.viewport.renderer.shared.clone();
+    let max_side = shared.lock().map(|s| s.max_capture_side.max(0) as u32).unwrap_or(0);
+    let mut keep = true;
+    let mut start = false;
+    let mut cancel = false;
+    let resp = modal.show(ctx, |ui| {
+        ui.set_width(460.0_f32.min(ctx.content_rect().width() - 64.0));
+        ui.label(RichText::new("Export map image").text_style(theme::title_style()));
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new("The map seen from straight above, with its textures, units and doodads, saved as a PNG.")
+                .color(t.text_dim),
+        );
+        ui.add_space(12.0);
+        if let Some(job) = &state.ui.viewport.export {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(job.progress());
+            });
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new(format!(
+                    "Strata waits up to {} seconds for models to load, then exports what it has.",
+                    crate::export_image::WAIT_SECONDS as u32
+                ))
+                .small()
+                .color(t.text_dim),
+            );
+            ui.add_space(16.0);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Cancel").clicked() {
+                    cancel = true;
+                }
+            });
+            return;
+        }
+        let regions: Vec<(strata_core::objects::ObjectId, String)> =
+            state.doc.regions.iter().map(|r| (r.id, r.name.clone())).collect();
+        let rect = area_rect(&state.doc, form.area);
+        egui::Grid::new("export-image").num_columns(2).spacing([16.0, 10.0]).show(ui, |ui| {
+            ui.label("Area");
+            ui.vertical(|ui| {
+                ui.radio_value(&mut form.area, Area::Playable, "Playable area");
+                ui.radio_value(&mut form.area, Area::Map, "Whole map");
+                if !regions.is_empty() {
+                    ui.horizontal(|ui| {
+                        let current = match form.area {
+                            Area::Region(id) => regions.iter().find(|r| r.0 == id).map(|r| r.1.clone()),
+                            _ => None,
+                        };
+                        let first = regions[0].0;
+                        if ui.radio(current.is_some(), "Region").clicked() && current.is_none() {
+                            form.area = Area::Region(first);
+                        }
+                        egui::ComboBox::from_id_salt("export-region")
+                            .width(180.0)
+                            .selected_text(current.unwrap_or_else(|| "Choose…".into()))
+                            .show_ui(ui, |ui| {
+                                for (id, name) in &regions {
+                                    ui.selectable_value(&mut form.area, Area::Region(*id), name);
+                                }
+                            });
+                    });
+                }
+            });
+            ui.end_row();
+
+            ui.label("Width");
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                for w in WIDTHS {
+                    ui.selectable_value(&mut form.width, w, format!("{w} px"));
+                }
+            });
+            ui.end_row();
+
+            ui.label("");
+            match &rect {
+                Ok(r) => {
+                    let (w, h, clamped) = image_size(*r, form.width, max_side);
+                    let mut text = format!("{w} × {h} pixels");
+                    if clamped {
+                        text.push_str(&format!(" (your graphics card renders at most {max_side} px per side)"));
+                    }
+                    ui.label(RichText::new(text).small().color(t.text_dim));
+                }
+                Err(e) => {
+                    ui.label(RichText::new(e).small().color(t.warn));
+                }
+            }
+            ui.end_row();
+
+            ui.label("Include");
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut form.units, "Units");
+                ui.checkbox(&mut form.doodads, "Doodads");
+            });
+            ui.end_row();
+        });
+        ui.add_space(16.0);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if primary_button(ui, "Export…", rect.is_ok(), t).clicked() {
+                start = true;
+            }
+            if ui.button("Cancel").clicked() {
+                ui.close();
+            }
+        });
+    });
+    let running = state.ui.viewport.export.is_some();
+    if cancel || (running && resp.should_close()) {
+        ExportJob::cancel(&shared);
+        state.ui.viewport.export = None;
+        keep = false;
+    } else if resp.should_close() {
+        keep = false;
+    }
+    if start {
+        match ExportJob::new(&state.doc, form.clone(), max_side, state.doc_generation) {
+            Ok(job) => {
+                ExportJob::cancel(&shared);
+                state.ui.viewport.export = Some(job);
+                ctx.request_repaint();
+            }
+            Err(e) => state.toast(ToastKind::Error, e),
+        }
+    }
+    keep
+}
+
 fn primary_button(ui: &mut egui::Ui, label: &str, enabled: bool, t: &Tokens) -> egui::Response {
     let text = RichText::new(label)
         .family(theme::medium())

@@ -45,6 +45,8 @@ pub enum Command {
     ShowProblems,
     /// Desktop: play the map in StarCraft II (unsaved edits included).
     TestMap,
+    /// Render the map from above to a PNG.
+    ExportImage,
     InstallApp,
     /// Desktop: ask GitHub for a newer release.
     CheckForUpdates,
@@ -122,6 +124,7 @@ impl Command {
             Command::FrameMap => "Frame the whole map".into(),
             Command::ShowProblems => "Check map for problems".into(),
             Command::TestMap => "Test map in StarCraft II".into(),
+            Command::ExportImage => "Export map image…".into(),
             Command::InstallApp => "Install Strata as an app".into(),
             Command::CheckForUpdates => "Check for updates…".into(),
             Command::InstallUpdate => "Install update".into(),
@@ -148,7 +151,7 @@ impl Command {
             Command::Workspace(_) => "Workspace",
             Command::FocusTab(_) => "Panel",
             Command::Theme(_) | Command::ResetLayout | Command::OpenPalette => "View",
-            Command::FrameMap | Command::ShowProblems | Command::TestMap => "Map",
+            Command::FrameMap | Command::ShowProblems | Command::TestMap | Command::ExportImage => "Map",
             Command::LoadGameData => "Data",
             Command::ConnectAi => "AI link",
             Command::ShowShortcuts
@@ -201,6 +204,7 @@ impl Command {
             Command::FrameMap => "zoom fit camera center",
             Command::ShowProblems => "validate errors warnings",
             Command::TestMap => "play run launch game test document starcraft",
+            Command::ExportImage => "png picture screenshot overhead top down render minimap save",
             Command::InstallApp => "pwa desktop offline",
             Command::CheckForUpdates | Command::InstallUpdate | Command::RestartToUpdate => "update upgrade version release new",
             Command::About => "version license",
@@ -270,6 +274,7 @@ pub fn all(cx: &Context<'_>) -> Vec<Command> {
     if cfg!(not(target_arch = "wasm32")) {
         v.push(Command::TestMap);
     }
+    v.push(Command::ExportImage);
     v.extend([
         Command::LoadGameData,
         Command::ConnectAi,

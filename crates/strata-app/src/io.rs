@@ -52,6 +52,8 @@ pub enum IoEvent {
     },
     /// Files to import into the open map.
     Import(ImportFiles),
+    /// A map image was saved (toast text), or why not.
+    ImageSaved(Result<String, String>),
     Cancelled,
 }
 
@@ -604,6 +606,63 @@ impl Io {
         }
     }
 
+    /// Save a PNG image: native asks where (then writes it on a worker);
+    /// the web downloads it. `summary` describes the image for the toast,
+    /// e.g. "2048 × 1536 pixels".
+    pub fn save_png(&mut self, ctx: &egui::Context, name: String, png: Vec<u8>, summary: String) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.busy = Some("Choosing where to save the image…".into());
+            let dir = self.save_path.as_ref().and_then(|p| p.parent()).map(|d| d.to_path_buf());
+            self.send_from_worker(ctx, move || {
+                let path = {
+                    #[cfg(windows)]
+                    {
+                        match crate::win_dialog::save("Export map image", &[("PNG image", &["png"])], &name, dir.as_deref()) {
+                            Ok(p) => Some(p),
+                            Err(e) => {
+                                log::warn!("Windows save dialog failed ({e}); using the portable one");
+                                None
+                            }
+                        }
+                    }
+                    #[cfg(not(windows))]
+                    {
+                        None::<Option<std::path::PathBuf>>
+                    }
+                };
+                let path = match path {
+                    Some(p) => p,
+                    None => {
+                        let d = rfd::AsyncFileDialog::new()
+                            .set_title("Export map image")
+                            .add_filter("PNG image", &["png"])
+                            .set_file_name(&name);
+                        let d = match &dir {
+                            Some(dir) => d.set_directory(dir),
+                            None => d,
+                        };
+                        block_on(d.save_file()).map(|h| h.path().to_path_buf())
+                    }
+                };
+                let Some(path) = path else { return IoEvent::Cancelled };
+                IoEvent::ImageSaved(match std::fs::write(&path, &png) {
+                    Ok(()) => Ok(format!("Saved {} ({summary})", path.display())),
+                    Err(e) => Err(format!(
+                        "Strata couldn't write {} ({e}). Check that the folder exists and is writable.",
+                        path.display()
+                    )),
+                })
+            });
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = ctx;
+            let r = download(&name, &png, "image/png").map(|()| format!("Downloaded {name} ({summary})"));
+            let _ = self.tx.send(IoEvent::ImageSaved(r));
+        }
+    }
+
     /// Native: ask where to save the map as an unpacked map folder.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn save_as_folder(&mut self, ctx: &egui::Context, doc: &MapDocument, file_name: Option<&str>) {
@@ -854,6 +913,11 @@ fn base_name(doc: &MapDocument, file_name: Option<&str>) -> String {
 
 pub fn sc2map_name(doc: &MapDocument, file_name: Option<&str>) -> String {
     format!("{}.SC2Map", base_name(doc, file_name))
+}
+
+/// Suggested file name for an exported map image.
+pub fn image_name(doc: &MapDocument, file_name: Option<&str>) -> String {
+    format!("{}.png", base_name(doc, file_name))
 }
 
 pub fn project_name(doc: &MapDocument, file_name: Option<&str>) -> String {

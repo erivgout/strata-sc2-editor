@@ -62,7 +62,31 @@ pub struct FrameParams {
     pub layers: [[f32; 4]; 8],
     /// Texture repeats per cell.
     pub tex_scale: f32,
+    /// Distance from the eye where the background haze starts. A huge value
+    /// turns it off (map image exports).
+    pub fog_start: f32,
 }
+
+/// A map image export waiting to be rendered by the next paint callback.
+pub struct CaptureRequest {
+    pub params: FrameParams,
+    pub width: i32,
+    pub height: i32,
+    /// Render even if model meshes or textures are still queued for upload
+    /// (the export stopped waiting).
+    pub force: bool,
+}
+
+/// Pixels of a finished export: RGBA, rows top to bottom.
+pub struct CapturedImage {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
+/// Exports this large or smaller are anti-aliased; bigger ones would need
+/// too much video memory for the multisampled buffers.
+const CAPTURE_MSAA_PIXELS: i64 = 2048 * 2048;
 
 /// State shared between the UI thread and the paint callback.
 #[derive(Default)]
@@ -75,6 +99,12 @@ pub struct Shared {
     pub samples: i32,
     /// Placed units and doodads as 3D models, drawn after the terrain.
     pub models: super::models::ModelPass,
+    /// A map image export to render (see [`CaptureRequest`]).
+    pub capture: Option<CaptureRequest>,
+    /// The finished export, or why it failed; taken by the UI.
+    pub captured: Option<Result<CapturedImage, String>>,
+    /// Longest image side the GPU can render; 0 until the renderer starts.
+    pub max_capture_side: i32,
 }
 
 pub type SharedHandle = Arc<Mutex<Shared>>;
@@ -90,6 +120,7 @@ pub fn callback(shared: SharedHandle, rect: egui::Rect, params: FrameParams) -> 
                 match unsafe { Gpu::new(gl) } {
                     Ok(g) => {
                         s.samples = g.max_samples;
+                        s.max_capture_side = g.max_side;
                         s.gpu = Some(g);
                     }
                     Err(e) => {
@@ -98,10 +129,17 @@ pub fn callback(shared: SharedHandle, rect: egui::Rect, params: FrameParams) -> 
                     }
                 }
             }
-            let Shared { gpu, uploads, models, .. } = &mut *s;
+            let Shared { gpu, uploads, models, capture, captured, .. } = &mut *s;
             if let Some(g) = gpu.as_mut() {
                 unsafe {
                     g.upload(gl, uploads);
+                    // An export renders first; the viewport then sets its
+                    // own targets and egui's framebuffer back up.
+                    if capture.as_ref().is_some_and(|c| c.force || !models.uploads_pending()) {
+                        if let Some(req) = capture.take() {
+                            *captured = Some(g.capture(gl, &req, models));
+                        }
+                    }
                     g.paint(gl, &info, &params, painter.intermediate_fbo(), models);
                 }
             }
@@ -117,6 +155,8 @@ struct Targets {
     resolve_fbo: glow::Framebuffer,
     resolve_tex: glow::Texture,
     resolve_depth: Option<glow::Renderbuffer>,
+    /// The driver reported the resolve framebuffer complete.
+    complete: bool,
 }
 
 struct Gpu {
@@ -158,6 +198,8 @@ struct Gpu {
     normal_arr: glow::Texture,
     targets: Option<Targets>,
     max_samples: i32,
+    /// Largest render target side the driver allows.
+    max_side: i32,
 }
 
 const TERRAIN_VS: &str = r#"
@@ -458,6 +500,115 @@ const TEXTURE_GAIN: f32 = 1.0;
 
 /// A `TEX_SIZE`² x 8 RGBA texture array with mipmaps, repeating, filtered
 /// anisotropically where the driver allows.
+/// Reverse the row order of an image with `stride` bytes per row (GL reads
+/// bottom-up; images are top-down).
+fn flip_rows(px: &mut [u8], stride: usize) {
+    let rows = px.len() / stride.max(1);
+    for y in 0..rows / 2 {
+        let (top, bottom) = px.split_at_mut((rows - 1 - y) * stride);
+        top[y * stride..(y + 1) * stride].swap_with_slice(&mut bottom[..stride]);
+    }
+}
+
+unsafe fn delete_targets(gl: &glow::Context, t: Targets) {
+    unsafe {
+        if let Some(f) = t.msaa_fbo {
+            gl.delete_framebuffer(f);
+        }
+        for rb in t.msaa_rbs {
+            gl.delete_renderbuffer(rb);
+        }
+        if let Some(rb) = t.resolve_depth {
+            gl.delete_renderbuffer(rb);
+        }
+        gl.delete_framebuffer(t.resolve_fbo);
+        gl.delete_texture(t.resolve_tex);
+    }
+}
+
+/// A color + depth target of `w` x `h` pixels: multisampled with `samples`
+/// when the driver allows (set to 0 when it doesn't), resolved into a texture.
+unsafe fn create_targets(gl: &glow::Context, w: i32, h: i32, samples: &mut i32) -> Result<Targets, String> {
+    unsafe {
+        let resolve_tex = gl.create_texture()?;
+        gl.bind_texture(glow::TEXTURE_2D, Some(resolve_tex));
+        gl.tex_image_2d(
+            glow::TEXTURE_2D,
+            0,
+            glow::RGBA8 as i32,
+            w,
+            h,
+            0,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelUnpackData::Slice(None),
+        );
+        for (p, v) in [
+            (glow::TEXTURE_MIN_FILTER, glow::NEAREST),
+            (glow::TEXTURE_MAG_FILTER, glow::NEAREST),
+            (glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE),
+            (glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE),
+        ] {
+            gl.tex_parameter_i32(glow::TEXTURE_2D, p, v as i32);
+        }
+        gl.bind_texture(glow::TEXTURE_2D, None);
+        let resolve_fbo = gl.create_framebuffer()?;
+        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(resolve_fbo));
+        gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(resolve_tex), 0);
+
+        let mut targets = Targets {
+            w,
+            h,
+            msaa_fbo: None,
+            msaa_rbs: Vec::new(),
+            resolve_fbo,
+            resolve_tex,
+            resolve_depth: None,
+            complete: false,
+        };
+        let mut msaa_ok = false;
+        if *samples > 1 {
+            let fbo = gl.create_framebuffer()?;
+            let color = gl.create_renderbuffer()?;
+            let depth = gl.create_renderbuffer()?;
+            gl.bind_renderbuffer(glow::RENDERBUFFER, Some(color));
+            gl.renderbuffer_storage_multisample(glow::RENDERBUFFER, *samples, glow::RGBA8, w, h);
+            gl.bind_renderbuffer(glow::RENDERBUFFER, Some(depth));
+            gl.renderbuffer_storage_multisample(glow::RENDERBUFFER, *samples, glow::DEPTH_COMPONENT24, w, h);
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+            gl.framebuffer_renderbuffer(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::RENDERBUFFER, Some(color));
+            gl.framebuffer_renderbuffer(glow::FRAMEBUFFER, glow::DEPTH_ATTACHMENT, glow::RENDERBUFFER, Some(depth));
+            msaa_ok = gl.check_framebuffer_status(glow::FRAMEBUFFER) == glow::FRAMEBUFFER_COMPLETE;
+            if msaa_ok {
+                targets.msaa_fbo = Some(fbo);
+                targets.msaa_rbs = vec![color, depth];
+            } else {
+                log::warn!("MSAA framebuffer incomplete; rendering without anti-aliasing");
+                gl.delete_framebuffer(fbo);
+                gl.delete_renderbuffer(color);
+                gl.delete_renderbuffer(depth);
+                *samples = 0;
+            }
+        }
+        if !msaa_ok {
+            let depth = gl.create_renderbuffer()?;
+            gl.bind_renderbuffer(glow::RENDERBUFFER, Some(depth));
+            gl.renderbuffer_storage(glow::RENDERBUFFER, glow::DEPTH_COMPONENT24, w, h);
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(resolve_fbo));
+            gl.framebuffer_renderbuffer(glow::FRAMEBUFFER, glow::DEPTH_ATTACHMENT, glow::RENDERBUFFER, Some(depth));
+            targets.resolve_depth = Some(depth);
+        }
+        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(resolve_fbo));
+        let status = gl.check_framebuffer_status(glow::FRAMEBUFFER);
+        gl.bind_renderbuffer(glow::RENDERBUFFER, None);
+        targets.complete = status == glow::FRAMEBUFFER_COMPLETE;
+        if !targets.complete {
+            log::error!("offscreen framebuffer {w}x{h} incomplete (0x{status:x})");
+        }
+        Ok(targets)
+    }
+}
+
 unsafe fn layer_array(gl: &glow::Context, aniso: Option<f32>) -> Result<glow::Texture, String> {
     unsafe {
         let t = gl.create_texture()?;
@@ -593,6 +744,10 @@ impl Gpu {
             gl.bind_texture(glow::TEXTURE_2D, None);
 
             let max_samples = gl.get_parameter_i32(glow::MAX_SAMPLES).clamp(0, 4);
+            let max_side = gl
+                .get_parameter_i32(glow::MAX_RENDERBUFFER_SIZE)
+                .min(gl.get_parameter_i32(glow::MAX_TEXTURE_SIZE))
+                .max(0);
             let aniso = gl
                 .supported_extensions()
                 .iter()
@@ -640,6 +795,7 @@ impl Gpu {
                 normal_arr,
                 targets: None,
                 max_samples,
+                max_side,
             })
         }
     }
@@ -744,124 +900,60 @@ impl Gpu {
                 return Ok(());
             }
             if let Some(t) = self.targets.take() {
-                if let Some(f) = t.msaa_fbo {
-                    gl.delete_framebuffer(f);
-                }
-                for rb in t.msaa_rbs {
-                    gl.delete_renderbuffer(rb);
-                }
-                if let Some(rb) = t.resolve_depth {
-                    gl.delete_renderbuffer(rb);
-                }
-                gl.delete_framebuffer(t.resolve_fbo);
-                gl.delete_texture(t.resolve_tex);
+                delete_targets(gl, t);
             }
-            let resolve_tex = gl.create_texture()?;
-            gl.bind_texture(glow::TEXTURE_2D, Some(resolve_tex));
-            gl.tex_image_2d(
-                glow::TEXTURE_2D,
-                0,
-                glow::RGBA8 as i32,
-                w,
-                h,
-                0,
-                glow::RGBA,
-                glow::UNSIGNED_BYTE,
-                glow::PixelUnpackData::Slice(None),
-            );
-            for (p, v) in [
-                (glow::TEXTURE_MIN_FILTER, glow::NEAREST),
-                (glow::TEXTURE_MAG_FILTER, glow::NEAREST),
-                (glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE),
-                (glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE),
-            ] {
-                gl.tex_parameter_i32(glow::TEXTURE_2D, p, v as i32);
-            }
-            gl.bind_texture(glow::TEXTURE_2D, None);
-            let resolve_fbo = gl.create_framebuffer()?;
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(resolve_fbo));
-            gl.framebuffer_texture_2d(
-                glow::FRAMEBUFFER,
-                glow::COLOR_ATTACHMENT0,
-                glow::TEXTURE_2D,
-                Some(resolve_tex),
-                0,
-            );
-
-            let mut targets =
-                Targets { w, h, msaa_fbo: None, msaa_rbs: Vec::new(), resolve_fbo, resolve_tex, resolve_depth: None };
-            let mut msaa_ok = false;
-            if self.max_samples > 1 {
-                let fbo = gl.create_framebuffer()?;
-                let color = gl.create_renderbuffer()?;
-                let depth = gl.create_renderbuffer()?;
-                gl.bind_renderbuffer(glow::RENDERBUFFER, Some(color));
-                gl.renderbuffer_storage_multisample(glow::RENDERBUFFER, self.max_samples, glow::RGBA8, w, h);
-                gl.bind_renderbuffer(glow::RENDERBUFFER, Some(depth));
-                gl.renderbuffer_storage_multisample(
-                    glow::RENDERBUFFER,
-                    self.max_samples,
-                    glow::DEPTH_COMPONENT24,
-                    w,
-                    h,
-                );
-                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
-                gl.framebuffer_renderbuffer(
-                    glow::FRAMEBUFFER,
-                    glow::COLOR_ATTACHMENT0,
-                    glow::RENDERBUFFER,
-                    Some(color),
-                );
-                gl.framebuffer_renderbuffer(glow::FRAMEBUFFER, glow::DEPTH_ATTACHMENT, glow::RENDERBUFFER, Some(depth));
-                msaa_ok = gl.check_framebuffer_status(glow::FRAMEBUFFER) == glow::FRAMEBUFFER_COMPLETE;
-                targets.msaa_fbo = Some(fbo);
-                targets.msaa_rbs = vec![color, depth];
-                if !msaa_ok {
-                    log::warn!("MSAA framebuffer incomplete; rendering without anti-aliasing");
-                    gl.delete_framebuffer(fbo);
-                    gl.delete_renderbuffer(color);
-                    gl.delete_renderbuffer(depth);
-                    targets.msaa_fbo = None;
-                    targets.msaa_rbs.clear();
-                    self.max_samples = 0;
-                }
-            }
-            if !msaa_ok {
-                let depth = gl.create_renderbuffer()?;
-                gl.bind_renderbuffer(glow::RENDERBUFFER, Some(depth));
-                gl.renderbuffer_storage(glow::RENDERBUFFER, glow::DEPTH_COMPONENT24, w, h);
-                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(resolve_fbo));
-                gl.framebuffer_renderbuffer(glow::FRAMEBUFFER, glow::DEPTH_ATTACHMENT, glow::RENDERBUFFER, Some(depth));
-                targets.resolve_depth = Some(depth);
-            }
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(resolve_fbo));
-            let status = gl.check_framebuffer_status(glow::FRAMEBUFFER);
-            gl.bind_renderbuffer(glow::RENDERBUFFER, None);
-            self.targets = Some(targets);
-            if status != glow::FRAMEBUFFER_COMPLETE {
-                return Err(format!("offscreen framebuffer incomplete (0x{status:x})"));
+            let t = create_targets(gl, w, h, &mut self.max_samples)?;
+            let complete = t.complete;
+            self.targets = Some(t);
+            if !complete {
+                return Err("offscreen framebuffer incomplete".into());
             }
             Ok(())
         }
     }
 
-    unsafe fn paint(
+    /// Render `req` into its own offscreen target and read the pixels back.
+    unsafe fn capture(
         &mut self,
         gl: &glow::Context,
-        info: &egui::PaintCallbackInfo,
-        p: &FrameParams,
-        out_fbo: Option<glow::Framebuffer>,
+        req: &CaptureRequest,
         models: &mut super::models::ModelPass,
+    ) -> Result<CapturedImage, String> {
+        unsafe {
+            let (w, h) = (req.width, req.height);
+            if w < 1 || h < 1 || w > self.max_side || h > self.max_side {
+                return Err(format!("the graphics card can't render a {w}x{h} image (largest side {})", self.max_side));
+            }
+            let mut samples = if (w as i64) * (h as i64) <= CAPTURE_MSAA_PIXELS { self.max_samples } else { 0 };
+            let t = create_targets(gl, w, h, &mut samples)?;
+            if !t.complete {
+                delete_targets(gl, t);
+                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                return Err(format!("the graphics card couldn't make a {w}x{h} image; try a smaller width"));
+            }
+            self.draw_scene(gl, &req.params, &t, models, true);
+            let mut rgba = vec![0u8; w as usize * h as usize * 4];
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(t.resolve_fbo));
+            gl.pixel_store_i32(glow::PACK_ALIGNMENT, 4);
+            gl.read_pixels(0, 0, w, h, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelPackData::Slice(Some(&mut rgba)));
+            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            delete_targets(gl, t);
+            flip_rows(&mut rgba, w as usize * 4);
+            Ok(CapturedImage { width: w as u32, height: h as u32, rgba })
+        }
+    }
+
+    /// Draw terrain, models and water into `t` (and resolve its MSAA).
+    unsafe fn draw_scene(
+        &self,
+        gl: &glow::Context,
+        p: &FrameParams,
+        t: &Targets,
+        models: &mut super::models::ModelPass,
+        capture: bool,
     ) {
         unsafe {
-            let vp = info.viewport_in_pixels();
-            let (w, h) = (vp.width_px.max(1), vp.height_px.max(1));
-            if let Err(e) = self.ensure_targets(gl, w, h) {
-                log::error!("{e}");
-                gl.bind_framebuffer(glow::FRAMEBUFFER, out_fbo);
-                return;
-            }
-            let t = self.targets.as_ref().expect("targets");
+            let (w, h) = (t.w, t.h);
             let draw_fbo = t.msaa_fbo.unwrap_or(t.resolve_fbo);
 
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(draw_fbo));
@@ -903,8 +995,7 @@ impl Gpu {
                 v4(self.u_unwalk.as_ref(), p.unwalkable);
                 v4(self.u_unbuild.as_ref(), p.unbuildable);
                 v4(self.u_nofly.as_ref(), p.nofly);
-                let fog_start = p.map_size[0].max(p.map_size[1]) * 1.2;
-                gl.uniform_4_f32(self.u_fog.as_ref(), p.clear[0], p.clear[1], p.clear[2], fog_start);
+                gl.uniform_4_f32(self.u_fog.as_ref(), p.clear[0], p.clear[1], p.clear[2], p.fog_start);
                 let layers: Vec<f32> = p.layers.iter().flatten().copied().collect();
                 gl.uniform_4_f32_slice(self.u_layers.as_ref(), &layers);
                 gl.uniform_2_f32(self.u_tex.as_ref(), p.tex_scale, TEXTURE_GAIN);
@@ -926,7 +1017,7 @@ impl Gpu {
                 gl.active_texture(glow::TEXTURE0);
             }
 
-            models.paint(gl, p);
+            models.paint(gl, p, capture);
 
             if let Some(z) = p.water {
                 gl.disable(glow::CULL_FACE);
@@ -951,6 +1042,27 @@ impl Gpu {
                 gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(t.resolve_fbo));
                 gl.blit_framebuffer(0, 0, w, h, 0, 0, w, h, glow::COLOR_BUFFER_BIT, glow::NEAREST);
             }
+        }
+    }
+
+    unsafe fn paint(
+        &mut self,
+        gl: &glow::Context,
+        info: &egui::PaintCallbackInfo,
+        p: &FrameParams,
+        out_fbo: Option<glow::Framebuffer>,
+        models: &mut super::models::ModelPass,
+    ) {
+        unsafe {
+            let vp = info.viewport_in_pixels();
+            let (w, h) = (vp.width_px.max(1), vp.height_px.max(1));
+            if let Err(e) = self.ensure_targets(gl, w, h) {
+                log::error!("{e}");
+                gl.bind_framebuffer(glow::FRAMEBUFFER, out_fbo);
+                return;
+            }
+            let t = self.targets.as_ref().expect("targets");
+            self.draw_scene(gl, p, t, models, false);
 
             // Composite into egui's framebuffer, clipped to the panel.
             gl.bind_framebuffer(glow::FRAMEBUFFER, out_fbo);
@@ -971,5 +1083,18 @@ impl Gpu {
             gl.bind_texture(glow::TEXTURE_2D, None);
             gl.use_program(None);
         }
+    }
+}
+
+#[cfg(test)]
+mod capture_tests {
+    #[test]
+    fn rows_flip_top_to_bottom() {
+        let mut px = vec![1, 1, 2, 2, 3, 3];
+        super::flip_rows(&mut px, 2);
+        assert_eq!(px, vec![3, 3, 2, 2, 1, 1]);
+        let mut even = vec![1, 2, 3, 4];
+        super::flip_rows(&mut even, 2);
+        assert_eq!(even, vec![3, 4, 1, 2]);
     }
 }
