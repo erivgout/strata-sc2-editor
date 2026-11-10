@@ -111,10 +111,11 @@ publisher (it isn't code-signed yet): choose **More info → Run anyway**.
 Prefer no installer? `strata-v<version>-windows-x64.exe` is the same app as a
 single file you can run from anywhere.
 
-Strata checks for new versions when it starts (and from **Help → Check for
-updates…**). When one is available it asks first; **Update now** downloads
-it, verifies it against the release's SHA-256 checksum, and finishes the
-update when you restart or quit.
+Strata checks for new versions when it starts, every few hours while it
+runs, and from **Help → Check for updates…**. When one is available an
+**Update** button appears next to **Test**: it downloads the new version,
+verifies it against the release's SHA-256 checksum, and **Restart to
+update** switches to it (it also finishes when you quit).
 
 `strata-mcp-v<version>-windows-x64.exe` is the MCP server for AI assistants
 (see [AI assistants](#ai-assistants-mcp)).

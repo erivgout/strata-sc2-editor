@@ -3477,7 +3477,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "strata-app"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytemuck",
  "eframe",
@@ -3513,7 +3513,7 @@ dependencies = [
 
 [[package]]
 name = "strata-casc"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "miniz_oxide 0.8.9",
  "thiserror 2.0.21",
@@ -3521,7 +3521,7 @@ dependencies = [
 
 [[package]]
 name = "strata-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "glam",
  "miniz_oxide 0.8.9",
@@ -3533,7 +3533,7 @@ dependencies = [
 
 [[package]]
 name = "strata-dds"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "texture2ddecoder",
  "thiserror 2.0.21",
@@ -3541,7 +3541,7 @@ dependencies = [
 
 [[package]]
 name = "strata-format"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "quick-xml 0.38.4",
  "serde_json",
@@ -3552,7 +3552,7 @@ dependencies = [
 
 [[package]]
 name = "strata-m3"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "glam",
  "strata-casc",
@@ -3561,7 +3561,7 @@ dependencies = [
 
 [[package]]
 name = "strata-mcp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "glam",
  "httparse",
@@ -3574,7 +3574,7 @@ dependencies = [
 
 [[package]]
 name = "strata-mpq"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "crc32fast",
  "libbz2-rs-sys",

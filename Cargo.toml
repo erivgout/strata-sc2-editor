@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/strata-mpq", "crates/strata-casc", "crates/strata-core", "crates/strata-format", "crates/strata-app", "crates/strata-mcp", "crates/strata-dds", "crates/strata-m3"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 rust-version = "1.85"
