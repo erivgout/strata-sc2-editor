@@ -28,7 +28,9 @@ What works today:
 - Real maps: opens `.SC2Map` archives and folder maps (the official
   editor's component format), and writes them back byte-for-byte unless you
   changed something. **File › Save map as .SC2Map file** and **Save map as
-  folder** convert between the two. Verified in StarCraft II (build 98310):
+  folder** convert between the two. Every save is read back from disk and
+  compared file by file before it replaces your map, so a failed save never
+  damages the original. Verified in StarCraft II (build 98310):
   a map made from scratch in Strata, a real map saved unchanged, and edited
   real maps all load and play.
 - Custom models, textures and sounds (**Assets** panel): drop files or a
@@ -46,19 +48,31 @@ What works today:
   such as Marine's 45 life.
 - Map editing: 3D terrain with sculpt, paint, cliff level and pathing
   brushes; units, doodads, points, start locations, regions and cameras.
+  The unit picker shows each unit's icon and filters by object family,
+  race and object type like the official palette; placing keeps the tool
+  active so you can click down several units (Esc leaves it).
 - Triggers: editor with a searchable library of 348 functions taken from the
   game's own trigger library, live Galaxy script with a linter.
+- Problems checks your data against the game's own: with the game data
+  loaded, every parent, link field and placed unit or doodad type must name
+  a real entry, not just look plausible. It also warns when start locations
+  look cut off from each other by cliffs.
 - Data, Text, Map properties, Problems and History panels; workspaces
   (Ctrl+1..4), command palette, dark and light themes, autosave,
   installable web app.
 - MCP: `strata-mcp` for Claude Code, Claude Desktop and other MCP clients.
+  AI clients can look at the map (`render_map` returns a picture), place
+  many objects or scatter doodads in one step, mirror a half for symmetric
+  melee maps, cut ramps, check ground paths, and test the map in
+  StarCraft II.
 
 ## Known issues
 
 - Maps whose triggers were made in the official editor keep those triggers
   untouched, but Strata can't add its own triggers to them yet: saving such a
   map with Strata triggers is refused rather than breaking the existing ones.
-- Cliff edits change cliff levels but don't generate cliff or ramp meshes.
+- Cliff edits and ramps (`make_ramp`) change cliff levels and heights but
+  don't generate StarCraft II's cliff or ramp meshes yet.
 - Water and the unbuildable / no-fly pathing flags can't be edited yet.
 - Editing `DocInfo/*` or player-name strings in the Text panel may be
   overridden by Map properties on save; teams and start locations edited in

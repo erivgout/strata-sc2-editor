@@ -103,29 +103,38 @@ counter-clockwise from east.
 | `map_new` | Replace the map with a new flat one |
 | `map_open` | Open a `.SC2Map`, map folder or `.strata.json` from disk |
 | `map_save` | Save to `.SC2Map`, a map folder or `.strata.json` |
+| `render_map` | A picture of the map from above (PNG image content): terrain, cliffs, water, bases, resources, units by owner, start locations, regions, grid; whole map or a rect |
 | `terrain_brush` | Raise, lower, smooth, flatten, noise, paint, erase, cliff, pathing along a path |
 | `terrain_stats` | Height, cliff, texture and pathing statistics for the map or a rect |
 | `sample_height` | Height, cliff level and pathing at points |
 | `add_texture_layer` | Add a texture layer (max 8) to paint with |
 | `place_object` | Place a unit, doodad or point |
+| `place_objects` | Place many objects in one undo step (all or nothing) |
+| `scatter_objects` | Random doodads (or units) over a region or rect: count or density, spacing, scale range, seed |
+| `mirror_map` | Copy one half onto the other (rotate 180, mirror X or Y): terrain, objects, player swap, start locations |
+| `make_ramp` | Walkable slope between two cliff levels |
+| `check_path` | Whether ground units can walk between two points, with the route |
 | `move_object` | Move an object |
 | `set_object_property` | Change owner, facing, scale, name or type |
 | `delete_objects` | Delete objects by id |
 | `list_objects` | Find objects by kind, type, owner, area, id or name |
-| `create_region` / `delete_region` | Rect, circle or polygon regions |
+| `create_region` / `update_region` / `delete_region` | Rect, circle or polygon regions; renaming updates triggers |
 | `list_regions` | Regions and cameras |
-| `create_camera` | Camera objects |
+| `create_camera` / `delete_camera` | Camera objects |
 | `create_trigger` / `update_trigger` / `delete_trigger` | Triggers, full model or simplified JSON |
+| `set_trigger_enabled` | Turn a trigger on or off (enabled, initially on) |
 | `list_triggers` / `get_trigger` | Trigger outline, variables; one trigger with its Galaxy |
 | `get_galaxy_script` | Generated MapScript.galaxy (or one trigger's part) |
 | `create_variable` / `delete_variable` | Global trigger variables |
 | `set_custom_script` | Custom Galaxy code |
-| `set_string` / `get_strings` | Localized text |
+| `set_string` / `get_strings` / `delete_string` | Localized text |
 | `set_data_field` / `list_data` | GameData catalog fields (e.g. CUnit Marine LifeMax) |
+| `delete_data` / `delete_data_field` | Remove a map data entry (refused while referenced unless `force`) or one field |
 | `list_base_units` | Real StarCraft II units (id, name, race, size) from your install |
 | `search_base_data` / `get_base_data` | Base-game catalogs: find ids, read inherited fields (Marine LifeMax 45) |
 | `set_map_info` / `set_player` | Map properties and player slots |
-| `validate_map` | Problems list |
+| `validate_map` | Problems list, including the data reference audit and start-location connectivity |
+| `test_in_game` | Start StarCraft II on the current map, like the editor's Test Document |
 | `undo` / `redo` / `history` | History on the active target |
 
 The base-game tools read your own StarCraft II install (`STRATA_SC2_DIR`, or
