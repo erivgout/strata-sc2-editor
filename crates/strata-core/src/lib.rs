@@ -21,6 +21,8 @@
 //!   what uses them, importing, and building custom sounds and units.
 //! - [`validate`]: problems shown in the Problems panel, and the data reference audit.
 //! - [`png`]: a small PNG encoder for map images.
+//! - [`map_image`]: a schematic overhead picture of the map (CPU, used by MCP).
+//! - [`walk`]: ground connectivity (walkable cells, routes between points).
 
 pub mod base_data;
 pub mod brush;
@@ -31,6 +33,7 @@ pub mod galaxy;
 pub mod history;
 pub mod known;
 pub mod map_files;
+pub mod map_image;
 pub mod models;
 pub mod objects;
 pub mod png;
@@ -40,6 +43,7 @@ pub mod strings;
 pub mod terrain;
 pub mod trigger_lib;
 pub mod triggers;
+pub mod walk;
 pub mod validate;
 
 pub use document::{MapDocument, MapInfo, Player, PlayerControl, Race};

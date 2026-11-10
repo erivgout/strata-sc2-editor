@@ -58,6 +58,8 @@ pub mod strings;
 pub mod terrain;
 pub mod triggers;
 mod xml;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod playtest;
 
 /// Archive path (with `/` separators) -> file contents.
 pub type FileMap = BTreeMap<String, Vec<u8>>;

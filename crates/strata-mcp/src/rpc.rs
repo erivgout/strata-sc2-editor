@@ -135,11 +135,8 @@ fn handle_one(strata: &Strata, msg: Value) -> Option<Value> {
                 return Some(error(id, INVALID_PARAMS, "tools/call needs params.name"));
             };
             let args = params.get("arguments").cloned().unwrap_or(Value::Null);
-            match tools::call(strata, name, &args) {
-                Ok(text) => result(
-                    id,
-                    json!({"content": [{"type": "text", "text": text}], "isError": false}),
-                ),
+            match tools::call_content(strata, name, &args) {
+                Ok(content) => result(id, json!({"content": content, "isError": false})),
                 Err(CallError::Failed(e)) => {
                     crate::log!("{name} failed: {e}");
                     result(

@@ -10,7 +10,9 @@
 //! Submodules:
 //! - [`query`]: read-only questions about a document ([`query::Query`]).
 //! - [`link`]: the wire protocol between `strata-mcp` and a running editor.
+//! - [`build`]: bulk placement, scatter, mirroring and ramps.
 
+pub mod build;
 pub mod link;
 pub mod query;
 
@@ -22,7 +24,7 @@ use crate::catalog::{CatalogEntry, XmlNode};
 use crate::document::{MapDocument, Player, PlayerControl, Race};
 use crate::galaxy::ident;
 use crate::history::Edit;
-use crate::objects::{ObjectId, ObjectKind, PlacedObject};
+use crate::objects::{ObjectId, ObjectKind};
 use crate::regions::{Camera, Region, Shape};
 use crate::strings::LOCALES;
 use crate::terrain::{TextureLayer, MAX_TEXTURE_LAYERS};
@@ -211,6 +213,117 @@ pub enum Op {
         #[serde(default)]
         height: Option<f32>,
     },
+    /// Place many objects as one undoable step.
+    PlaceObjects {
+        objects: Vec<build::ObjectSpec>,
+    },
+    /// Spread objects over a region or rectangle at random.
+    Scatter {
+        /// Default doodad.
+        #[serde(default)]
+        kind: Option<ObjectKind>,
+        /// Types to pick from at random.
+        type_ids: Vec<String>,
+        /// A region by name...
+        #[serde(default)]
+        region: Option<String>,
+        /// ...or a rectangle [x0, y0, x1, y1].
+        #[serde(default)]
+        rect: Option<[f32; 4]>,
+        #[serde(default)]
+        count: Option<u32>,
+        /// Objects per 100 square cells.
+        #[serde(default)]
+        density: Option<f32>,
+        #[serde(default = "default_spacing")]
+        min_spacing: f32,
+        /// [min, max] uniform scale.
+        #[serde(default)]
+        scale: Option<[f32; 2]>,
+        #[serde(default = "yes")]
+        random_rotation: bool,
+        /// Skip unpathable cells and cliffs.
+        #[serde(default = "yes")]
+        avoid_unpathable: bool,
+        #[serde(default)]
+        player: Option<u8>,
+        #[serde(default)]
+        seed: Option<u64>,
+    },
+    /// Copy one half of the map onto the other for symmetric maps.
+    Mirror {
+        symmetry: build::Symmetry,
+        /// The half to keep and copy from.
+        keep: build::Side,
+        /// Player pairs that swap on the copied half (default [[1, 2]]).
+        #[serde(default)]
+        players: Option<Vec<[u8; 2]>>,
+        #[serde(default = "yes")]
+        terrain: bool,
+        #[serde(default = "yes")]
+        objects: bool,
+    },
+    /// A walkable slope from `from` to `to`, `width` cells wide.
+    Ramp {
+        from: [f32; 2],
+        to: [f32; 2],
+        #[serde(default = "default_ramp_width")]
+        width: f32,
+    },
+    /// Move, reshape, recolor or rename a region; omitted fields are kept.
+    /// Renaming updates triggers that refer to it.
+    UpdateRegion {
+        name: String,
+        #[serde(default)]
+        new_name: Option<String>,
+        /// Replaces all of the region's shapes.
+        #[serde(default)]
+        shape: Option<Shape>,
+        #[serde(default)]
+        color: Option<[u8; 3]>,
+        /// Move every shape by [dx, dy].
+        #[serde(default)]
+        offset: Option<[f32; 2]>,
+    },
+    /// Remove a data entry. Refused while other entries refer to it unless `force`.
+    DeleteData {
+        class: String,
+        id: String,
+        #[serde(default)]
+        force: bool,
+    },
+    /// Remove one field (e.g. "LifeMax" or "CostResource[Minerals]") from a data entry.
+    DeleteDataField {
+        class: String,
+        id: String,
+        field: String,
+    },
+    /// Remove a text key, from one locale or all of them.
+    DeleteString {
+        key: String,
+        #[serde(default)]
+        locale: Option<String>,
+    },
+    /// Turn a trigger on or off without rewriting it.
+    SetTriggerEnabled {
+        name: String,
+        /// Whether the trigger exists in the map script at all.
+        #[serde(default)]
+        enabled: Option<bool>,
+        /// Whether it starts on when the map loads.
+        #[serde(default)]
+        initially_on: Option<bool>,
+    },
+}
+
+fn yes() -> bool {
+    true
+}
+fn default_spacing() -> f32 {
+    1.0
+}
+fn default_ramp_width() -> f32 {
+    4.0
 }
 
 fn default_radius() -> f32 {
@@ -443,26 +556,11 @@ impl Op {
                 rotation,
                 name,
             } => {
-                if kind != ObjectKind::Point && type_id.trim().is_empty() {
-                    return invalid("type_id is required for units and doodads, e.g. \"Marine\" or \"CharRock01\"");
-                }
-                check_in_map(doc, x, y)?;
-                check_finite("rotation", rotation)?;
-                if let Some(p) = player {
-                    check_player(p)?;
-                }
-                let id = doc.objects.alloc_id();
-                let z = doc.terrain.sample_height(x, y);
-                let mut o = PlacedObject::new(id, kind, type_id, glam::Vec3::new(x, y, z));
-                o.rotation = rotation;
-                o.name = if kind == ObjectKind::Point && name.trim().is_empty() {
-                    format!("Point {}", id.0)
-                } else {
-                    name
-                };
-                if let Some(p) = player {
-                    o.player = p;
-                }
+                let o = build::new_object(
+                    doc,
+                    build::ObjectSpec { kind: Some(kind), type_id, x, y, player, rotation, scale: None, name },
+                )?;
+                let id = o.id;
                 let label = format!("Place {}", o.display_name());
                 let edit = Edit::Object {
                     id,
@@ -1117,6 +1215,197 @@ impl Op {
             Op::SetWater { .. } => invalid(
                 "water can't be saved to .SC2Map files yet, so Strata refuses to change it rather than lose the edit",
             ),
+            Op::PlaceObjects { objects } => build::place_objects(doc, objects),
+            Op::Scatter {
+                kind,
+                type_ids,
+                region,
+                rect,
+                count,
+                density,
+                min_spacing,
+                scale,
+                random_rotation,
+                avoid_unpathable,
+                player,
+                seed,
+            } => {
+                let args = build::ScatterArgs {
+                    kind: kind.unwrap_or(ObjectKind::Doodad),
+                    type_ids,
+                    count,
+                    density,
+                    min_spacing,
+                    scale: scale.unwrap_or([1.0, 1.0]),
+                    random_rotation,
+                    avoid_unpathable,
+                    player,
+                    seed: seed.unwrap_or(doc.objects.next_id as u64 ^ 0x5eed),
+                };
+                let regions = doc.regions.clone();
+                let area = match (region, rect) {
+                    (Some(n), None) => build::Area::Region(
+                        regions.iter().find(|r| r.name == n).ok_or_else(|| OpError::NotFound(format!("region \"{n}\"")))?,
+                    ),
+                    (None, Some(r)) => {
+                        for v in r {
+                            check_finite("rect", v)?;
+                        }
+                        build::Area::Rect(r)
+                    }
+                    _ => return invalid("give exactly one of region (a region name) or rect [x0, y0, x1, y1]"),
+                };
+                build::scatter(doc, area, args)
+            }
+            Op::Mirror { symmetry, keep, players, terrain, objects } => build::mirror(
+                doc,
+                build::MirrorArgs { symmetry, keep, players: players.unwrap_or_else(|| vec![[1, 2]]), terrain, objects },
+            ),
+            Op::Ramp { from, to, width } => build::ramp(doc, from, to, width),
+            Op::UpdateRegion { name, new_name, shape, color, offset } => {
+                let i = doc
+                    .regions
+                    .iter()
+                    .position(|r| r.name == name)
+                    .ok_or_else(|| OpError::NotFound(format!("region \"{name}\"")))?;
+                if let Some(s) = &shape {
+                    check_shape(s)?;
+                }
+                if let Some(n) = &new_name {
+                    check_name("region", n)?;
+                    if *n != name && doc.regions.iter().any(|r| r.name == *n) {
+                        return invalid(format!("a region named \"{n}\" already exists"));
+                    }
+                }
+                if let Some(o) = offset {
+                    check_finite("offset", o[0])?;
+                    check_finite("offset", o[1])?;
+                }
+                if new_name.is_none() && shape.is_none() && color.is_none() && offset.is_none() {
+                    return invalid("nothing to change: give new_name, shape, color or offset");
+                }
+                let before = doc.regions.clone();
+                let r = &mut doc.regions[i];
+                if let Some(s) = shape {
+                    r.shapes = vec![s];
+                }
+                if let Some(o) = offset {
+                    for s in &mut r.shapes {
+                        s.translate(glam::Vec2::from(o));
+                    }
+                }
+                if let Some(c) = color {
+                    r.color = c;
+                }
+                let mut edits = vec![];
+                let mut renamed_refs = 0;
+                if let Some(n) = new_name.filter(|n| *n != name) {
+                    r.name = n.clone();
+                    let tb = Box::new(doc.triggers.clone());
+                    renamed_refs = build::rename_placed(&mut doc.triggers, &name, &n);
+                    if renamed_refs > 0 {
+                        doc.dirty.triggers = true;
+                        edits.push(Edit::Triggers { before: tb, after: Box::new(doc.triggers.clone()) });
+                    }
+                }
+                doc.dirty.regions = true;
+                edits.insert(0, Edit::Regions { before, after: doc.regions.clone() });
+                ok(format!("Edit region {name}"), Edit::Batch(edits), json!({"trigger_references_updated": renamed_refs}))
+            }
+            Op::DeleteData { class, id, force } => {
+                let index = doc
+                    .data
+                    .entries
+                    .iter()
+                    .position(|e| e.class() == class && e.id() == id)
+                    .ok_or_else(|| OpError::NotFound(format!("{class} \"{id}\" in the map's data")))?;
+                let refs: Vec<String> = doc
+                    .data
+                    .references_to(&id)
+                    .into_iter()
+                    .filter(|r| r.index != index)
+                    .map(|r| format!("{}.{}", doc.data.entries[r.index].id(), r.path))
+                    .collect();
+                if !refs.is_empty() && !force {
+                    return invalid(format!(
+                        "{id} is used by {} field(s): {}{}; change those first or pass force: true",
+                        refs.len(),
+                        refs.iter().take(5).cloned().collect::<Vec<_>>().join(", "),
+                        if refs.len() > 5 { ", ..." } else { "" }
+                    ));
+                }
+                let before = doc.data.entries[index].clone();
+                let edit = Edit::Data { index, before: Some(before), after: None };
+                edit.apply(doc, true);
+                ok(format!("Delete {id}"), edit, json!({"dangling_references": refs}))
+            }
+            Op::DeleteDataField { class, id, field } => {
+                let index = doc
+                    .data
+                    .entries
+                    .iter()
+                    .position(|e| e.class() == class && e.id() == id)
+                    .ok_or_else(|| OpError::NotFound(format!("{class} \"{id}\" in the map's data")))?;
+                let key = crate::catalog::FieldKey::parse(&field);
+                let before = doc.data.entries[index].clone();
+                let mut after = before.clone();
+                let Some(child) = after.node.find_keyed(&key) else {
+                    return invalid(format!("{id} has no {field} field of its own (inherited values can't be removed)"));
+                };
+                after.node.children.remove(child);
+                let edit = Edit::Data { index, before: Some(before), after: Some(after) };
+                edit.apply(doc, true);
+                ok(format!("Remove {id}.{field}"), edit, json!({}))
+            }
+            Op::DeleteString { key, locale } => {
+                if let Some(l) = &locale {
+                    if !LOCALES.contains(&l.as_str()) {
+                        return invalid(format!("unknown locale \"{l}\"; use one of {}", LOCALES.join(", ")));
+                    }
+                }
+                let before = Box::new(doc.strings.clone());
+                let removed = match &locale {
+                    Some(l) => doc.strings.locales.get_mut(l).and_then(|m| m.remove(&key)).map_or(0, |_| 1),
+                    None => {
+                        let n = doc.strings.locales.values().filter(|m| m.contains_key(&key)).count();
+                        doc.strings.remove(&key);
+                        n
+                    }
+                };
+                if removed == 0 {
+                    return Err(OpError::NotFound(format!("text key \"{key}\"")));
+                }
+                doc.dirty.strings = true;
+                ok(
+                    format!("Delete text {key}"),
+                    Edit::Strings { before, after: Box::new(doc.strings.clone()) },
+                    json!({"locales_removed": removed}),
+                )
+            }
+            Op::SetTriggerEnabled { name, enabled, initially_on } => {
+                if enabled.is_none() && initially_on.is_none() {
+                    return invalid("give enabled and/or initially_on");
+                }
+                let id = doc
+                    .triggers
+                    .triggers()
+                    .iter()
+                    .find(|t| t.name == name)
+                    .map(|t| t.id)
+                    .ok_or_else(|| OpError::NotFound(format!("trigger \"{name}\"")))?;
+                let before = Box::new(doc.triggers.clone());
+                let t = doc.triggers.trigger_mut(id).expect("trigger exists");
+                if let Some(e) = enabled {
+                    t.enabled = e;
+                }
+                if let Some(o) = initially_on {
+                    t.initially_on = o;
+                }
+                let state = json!({"enabled": t.enabled, "initially_on": t.initially_on});
+                doc.dirty.triggers = true;
+                ok(format!("Edit trigger {name}"), Edit::Triggers { before, after: Box::new(doc.triggers.clone()) }, state)
+            }
+
         }
     }
 }

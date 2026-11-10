@@ -193,6 +193,11 @@ pub fn validate_with(doc: &MapDocument, base: Option<&BaseCatalog>) -> Vec<Probl
         }
     }
 
+    // Start locations must be joined by walkable ground.
+    for (severity, message, target) in start_connectivity(doc) {
+        push(severity, message, target);
+    }
+
     // Objects.
     let (w, h) = (doc.terrain.width as f32, doc.terrain.height as f32);
     let mut point_names: HashMap<&str, usize> = HashMap::new();
@@ -343,6 +348,60 @@ pub fn validate_with(doc: &MapDocument, base: Option<&BaseCatalog>) -> Vec<Probl
     check_strings(doc, &mut out);
 
     out.sort_by_key(|p| p.severity);
+    out
+}
+
+/// Problems with ground connections between start locations: one on a
+/// cliff or unpathable ground, or groups of them that can't reach each other.
+fn start_connectivity(doc: &MapDocument) -> Vec<(Severity, String, Target)> {
+    // Start location points, else the players' own start locations.
+    let mut starts: Vec<(String, glam::Vec2, Target)> = doc
+        .objects
+        .objects
+        .iter()
+        .filter(|o| o.kind == ObjectKind::Point && o.type_id == "StartLoc")
+        .map(|o| (o.display_name().to_string(), o.position.truncate(), Target::Object(o.id)))
+        .collect();
+    if starts.is_empty() {
+        starts = doc
+            .info
+            .players
+            .iter()
+            .filter_map(|p| p.start_location.map(|s| (format!("Player {}'s start location", p.id), s, Target::Map)))
+            .collect();
+    }
+    let mut out = Vec::new();
+    if starts.len() < 2 {
+        return out;
+    }
+    let grid = crate::walk::WalkGrid::new(doc);
+    let labels = grid.components();
+    let mut groups: Vec<(u32, Vec<&str>)> = Vec::new();
+    for (name, p, target) in &starts {
+        let Some(c) = grid.cell_at(p.x, p.y) else { continue };
+        if let Some(b) = grid.blocked(c) {
+            if b != crate::walk::Blocked::OutsidePlayable {
+                out.push((Severity::Warning, format!("{name} is {}, so ground units may not be able to leave it.", b.describe()), target.clone()));
+            }
+            continue;
+        }
+        let label = labels[(c.1 * grid.width + c.0) as usize];
+        match groups.iter_mut().find(|g| g.0 == label) {
+            Some(g) => g.1.push(name),
+            None => groups.push((label, vec![name])),
+        }
+    }
+    if groups.len() > 1 {
+        let parts: Vec<String> = groups.iter().map(|g| g.1.join(" and ")).collect();
+        out.push((
+            Severity::Warning,
+            format!(
+                "Ground units may not be able to walk between some start locations: {} look cut off from each other by cliffs or unpathable ground. Add a ramp or clear the pathing. (Strata checks terrain and pathing only, not units, doodads or painted pathing.)",
+                parts.join("; ")
+            ),
+            Target::Map,
+        ));
+    }
     out
 }
 

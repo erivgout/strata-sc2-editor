@@ -401,6 +401,94 @@ pathing sets (on: true) or clears `flags` on cells. Heights clamp to -16..64. Us
         read(def("history", "History",
             "The undo and redo stacks, newest first, each entry labeled with who made it (user or ai), plus whether the map has unsaved changes.",
             obj(json!({"limit": int("Entries per stack (default 50).", 1, 500)}), &[]))),
+
+        read(def("render_map", "Look at the map",
+            format!("A picture of the map seen from above (PNG), so you can check terrain, cliffs, bases, resources and layout by eye. North is up. Terrain is colored by texture and lit by slope (brighter = higher), cliff edges are dark, the playable area is framed in white, units are dots in their owner's color, minerals light blue, geysers green, doodads brown, start locations white rings, regions colored outlines, with grid lines every 16 cells. Pass rect to zoom in. {xy}"),
+            obj(json!({
+                "rect": rect("Only this area [x0, y0, x1, y1] (default: whole map)."),
+                "width": int("Image width in pixels (default 768).", 64, 2048),
+                "objects": boolean("Draw units, doodads and points (default true)."),
+                "regions": boolean("Draw region outlines (default true)."),
+                "pathing": boolean("Tint cells ground units can't walk on red (default false)."),
+                "grid": int("Grid line spacing in cells, 0 for none (default 16).", 0, 256),
+            }), &[]))),
+        read(def("check_path", "Check ground path",
+            format!("Can ground units walk from one point to another? Returns the route length and waypoints, or why not (a point on a cliff or unpathable ground, or the two areas cut off by cliffs). Uses terrain, cliffs and pathing; placed units and doodads are not counted as obstacles. validate_map also checks that start locations are connected. {xy}"),
+            obj(json!({"from": json!({"type": "array", "description": "Start [x, y].", "items": {"type": "number"}, "minItems": 2, "maxItems": 2}),
+                       "to": json!({"type": "array", "description": "End [x, y].", "items": {"type": "number"}, "minItems": 2, "maxItems": 2})}), &["from", "to"]))),
+
+        def("place_objects", "Place many objects",
+            format!("Place several units, doodads or points in one call, as one undoable step (e.g. a mineral line, a base, a squad). All are validated first; if any is invalid nothing is placed. Returns the new ids in order. {xy}"),
+            obj(json!({"objects": {"type": "array", "minItems": 1, "maxItems": 5000, "description": "Objects to place.", "items": {"type": "object", "additionalProperties": false, "required": ["x", "y"], "properties": {
+                "kind": enumeration("Default unit.", &["unit", "doodad", "point"]),
+                "type_id": string("Unit type or doodad id. Not needed for points."),
+                "x": num("X position."),
+                "y": num("Y position."),
+                "player": int("Owner for units: 0 neutral, 1..15 (default 1).", 0, 15),
+                "facing": num("Degrees counter-clockwise from east."),
+                "scale": num("Uniform scale 0.01..100 (default 1)."),
+                "name": string("Optional name."),
+            }}}}), &["objects"])),
+        def("scatter_objects", "Scatter objects",
+            format!("Spread doodads (or units) at random over a region or rectangle: rocks, trees, debris. Give count or density, a minimum spacing, and optionally a scale range. Existing units and doodads are kept clear of, and cliffs and unpathable cells are skipped unless avoid_unpathable is false. The same seed gives the same layout. One undoable step. {xy}"),
+            obj(json!({
+                "type_ids": {"type": "array", "minItems": 1, "items": {"type": "string"}, "description": "Types to pick from at random, e.g. [\"CharRock01\", \"CharRock02\"]."},
+                "kind": enumeration("Default doodad.", &["doodad", "unit", "point"]),
+                "region": string("Scatter inside this region (by name)."),
+                "rect": rect("Or inside [x0, y0, x1, y1]."),
+                "count": int("How many to place.", 1, 2000),
+                "density": num("Or: objects per 100 square cells, e.g. 4."),
+                "min_spacing": num("Minimum distance between objects, 0..64 (default 1)."),
+                "scale": json!({"type": "array", "description": "[min, max] random uniform scale, e.g. [0.8, 1.3].", "items": {"type": "number"}, "minItems": 2, "maxItems": 2}),
+                "random_rotation": boolean("Random facing (default true)."),
+                "avoid_unpathable": boolean("Skip cliffs and unpathable cells (default true)."),
+                "player": int("Owner for units (default 1).", 0, 15),
+                "seed": int("Random seed for a repeatable layout.", 0, i64::MAX),
+            }), &["type_ids"])),
+        destructive(def("mirror_map", "Mirror map",
+            "Make the map symmetric by copying one half onto the other, around the center of the playable area: terrain heights, cliff levels, textures and pathing, plus units, doodads and points (rotated to match). Objects already on the other half are replaced. Units of player 1 become player 2 and vice versa (change with players), and players' start locations follow. rotate_180 (point symmetry, most 1v1 maps) can keep any half; mirror_x keeps west or east; mirror_y keeps south or north. Regions, cameras and triggers are not mirrored. One undoable step.",
+            obj(json!({
+                "symmetry": enumeration("How the halves relate.", &["rotate_180", "mirror_x", "mirror_y"]),
+                "keep": enumeration("The finished half to copy from.", &["west", "east", "south", "north"]),
+                "players": json!({"type": "array", "description": "Player pairs to swap on the copy (default [[1, 2]]), e.g. [[1, 2], [3, 4]].", "items": {"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 15}, "minItems": 2, "maxItems": 2}}),
+                "terrain": boolean("Mirror terrain (default true)."),
+                "objects": boolean("Mirror objects (default true)."),
+            }), &["symmetry", "keep"]))),
+        def("make_ramp", "Make ramp",
+            format!("Cut a walkable ramp from `from` (on one level) to `to` (on another): heights slope evenly between the two ends, cliff levels change halfway, and the cells under it become pathable. Put the ends a few cells back from the cliff edge on each side; a ramp must rise no more than about 0.8 height per cell, so one cliff level (2 height) needs at least 3 cells, usually 6-10 look right. Check the result with check_path. In StarCraft II itself the cliff and ramp meshes are not generated yet (as with cliffs painted in Strata). {xy}"),
+            obj(json!({
+                "from": json!({"type": "array", "description": "Start [x, y] on the first level.", "items": {"type": "number"}, "minItems": 2, "maxItems": 2}),
+                "to": json!({"type": "array", "description": "End [x, y] on the other level.", "items": {"type": "number"}, "minItems": 2, "maxItems": 2}),
+                "width": num("Width in cells, 1..24 (default 4)."),
+            }), &["from", "to"])),
+
+        destructive(def("delete_camera", "Delete camera", "Delete a camera object by name.", obj(json!({"name": string("Camera name.")}), &["name"]))),
+        def("update_region", "Edit region",
+            format!("Move, resize, recolor or rename a region without recreating it. Renaming also updates triggers that refer to it. Give a new shape as exactly one of rect, circle or polygon (it replaces the region's shapes), and/or offset to move it. {xy}"),
+            obj(json!({
+                "name": string("Current region name."),
+                "new_name": string("New name."),
+                "rect": rect("New rectangle [x0, y0, x1, y1]."),
+                "circle": json!({"type": "array", "description": "New circle [center_x, center_y, radius].", "items": {"type": "number"}, "minItems": 3, "maxItems": 3}),
+                "polygon": points("New polygon corners [[x, y], ...]."),
+                "offset": json!({"type": "array", "description": "Move by [dx, dy].", "items": {"type": "number"}, "minItems": 2, "maxItems": 2}),
+                "color": color("Display color."),
+            }), &["name"])),
+        destructive(def("delete_data", "Delete data entry",
+            "Delete one of the map's own data entries (class + id), e.g. a custom unit. Refused while other entries refer to it (they are listed) unless force is true. Base-game entries can't be deleted; override fields with set_data_field instead.",
+            obj(json!({"class": string("Class, e.g. \"CUnit\"."), "id": string("Entry id."), "force": boolean("Delete even if referenced (default false).")}), &["class", "id"]))),
+        destructive(def("delete_data_field", "Delete data field",
+            "Remove a field the map sets on a data entry, so the value is inherited again (from the parent or the base game). Field names as in set_data_field, e.g. \"LifeMax\" or \"CostResource[Minerals]\".",
+            obj(json!({"class": string("Class, e.g. \"CUnit\"."), "id": string("Entry id."), "field": string("Field name.")}), &["class", "id", "field"]))),
+        destructive(def("delete_string", "Delete text",
+            "Delete a text key, from one locale or (by default) all of them.",
+            obj(json!({"key": string("Text key, e.g. \"Param/Value/lib_1_00001\"."), "locale": string("Only this locale, e.g. \"enUS\".")}), &["key"]))),
+        def("set_trigger_enabled", "Turn trigger on or off",
+            "Change whether a trigger is enabled (included in the map script at all) and/or initially on (running from map start) without rewriting it.",
+            obj(json!({"name": string("Trigger name."), "enabled": boolean("Enabled."), "initially_on": boolean("Initially on.")}), &["name"])),
+        def("test_in_game", "Test in StarCraft II",
+            "Start StarCraft II on the current map (unsaved changes included), like the editor's Test Document: the game opens on the user's screen with player 1 human-controlled. Needs StarCraft II installed on this computer and not already running. You can't see the game; ask the user what happened.",
+            obj(json!({}), &[])),
     ]
 }
 
@@ -696,6 +784,40 @@ fn brush_op(a: &Args) -> Result<Op, String> {
         shape,
         falloff,
     })
+}
+
+fn render_query(a: &Args) -> Result<Query, String> {
+    Ok(Query::RenderMap {
+        rect: a.rect("rect")?,
+        width: a.int("width", 64, 2048)?.map(|w| w as u32),
+        objects: a.bool("objects")?,
+        regions: a.bool("regions")?,
+        pathing: a.bool("pathing")?,
+        grid: a.int("grid", 0, 256)?.map(|g| g as u32),
+    })
+}
+
+/// MCP content blocks for a tool call: an image plus its description for
+/// `render_map`, text for everything else.
+pub fn call_content(s: &Strata, name: &str, args: &Value) -> Result<Vec<Value>, CallError> {
+    if name != "render_map" {
+        return call(s, name, args).map(|text| vec![json!({"type": "text", "text": text})]);
+    }
+    // Validate the arguments the same way as every other tool.
+    call(s, name, args)?;
+    let empty = Map::new();
+    let map = match args {
+        Value::Object(m) => m,
+        _ => &empty,
+    };
+    let mut out = s.query(name, render_query(&Args(map))?)?;
+    let png = out
+        .value
+        .as_object_mut()
+        .and_then(|o| o.remove("png_base64"))
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .ok_or("the map image was not produced")?;
+    Ok(vec![json!({"type": "image", "data": png, "mimeType": "image/png"}), json!({"type": "text", "text": render(out)})])
 }
 
 fn region_shape(a: &Args) -> Result<Shape, String> {
@@ -1113,6 +1235,130 @@ pub fn call(s: &Strata, name: &str, args: &Value) -> Result<String, CallError> {
         "history" => query(Query::History {
             limit: a.int("limit", 1, 500)?.map(|l| l as usize),
         }),
+
+        "render_map" => {
+            let mut out = s.query(name, render_query(&a)?)?;
+            if let Some(o) = out.value.as_object_mut() {
+                o.remove("png_base64");
+            }
+            Ok(render(out))
+        }
+        "check_path" => query(Query::CheckPath {
+            from: a.point("from")?.ok_or("\"from\" is required: [x, y]")?,
+            to: a.point("to")?.ok_or("\"to\" is required: [x, y]")?,
+        }),
+        "place_objects" => {
+            let items = match a.get("objects") {
+                Some(Value::Array(v)) if !v.is_empty() => v,
+                _ => return Err("\"objects\" is required: a list of {type_id, x, y, ...}".into()),
+            };
+            let mut objects = Vec::with_capacity(items.len());
+            for (i, item) in items.iter().enumerate() {
+                let Value::Object(m) = item else {
+                    return Err(format!("objects[{i}] must be an object like {{\"type_id\": \"Marine\", \"x\": 10, \"y\": 12}}").into());
+                };
+                let o = Args(m);
+                let at = |e: String| format!("objects[{i}]: {e}");
+                if let Some(k) = m.keys().find(|k| !["kind", "type_id", "x", "y", "player", "facing", "scale", "name"].contains(&k.as_str())) {
+                    return Err(at(format!("unknown field \"{k}\"")).into());
+                }
+                objects.push(strata_core::ops::build::ObjectSpec {
+                    kind: o.choice("kind", &KINDS).map_err(at)?,
+                    type_id: o.str("type_id").map_err(at)?.unwrap_or_default(),
+                    x: o.need_f32("x").map_err(at)?,
+                    y: o.need_f32("y").map_err(at)?,
+                    player: o.int("player", 0, 15).map_err(at)?.map(|p| p as u8),
+                    rotation: facing(&o, "facing").map_err(at)?.unwrap_or(0.0),
+                    scale: o.f32("scale").map_err(at)?,
+                    name: o.str("name").map_err(at)?.unwrap_or_default(),
+                });
+            }
+            op(Op::PlaceObjects { objects })
+        }
+        "scatter_objects" => {
+            let type_ids = match a.get("type_ids") {
+                Some(Value::Array(v)) => v.iter().map(|t| t.as_str().map(str::to_owned).ok_or("type_ids must be strings")).collect::<Result<Vec<_>, _>>()?,
+                Some(Value::String(t)) => vec![t.clone()],
+                _ => return Err("\"type_ids\" is required, e.g. [\"CharRock01\"]".into()),
+            };
+            op(Op::Scatter {
+                kind: a.choice("kind", &KINDS)?,
+                type_ids,
+                region: a.str("region")?,
+                rect: a.rect("rect")?,
+                count: a.int("count", 1, 2000)?.map(|c| c as u32),
+                density: a.f32("density")?,
+                min_spacing: a.f32("min_spacing")?.unwrap_or(1.0),
+                scale: a.floats("scale", 2)?.map(|v| [v[0], v[1]]),
+                random_rotation: a.bool("random_rotation")?.unwrap_or(true),
+                avoid_unpathable: a.bool("avoid_unpathable")?.unwrap_or(true),
+                player: a.int("player", 0, 15)?.map(|p| p as u8),
+                seed: a.int("seed", 0, i64::MAX)?.map(|s| s as u64),
+            })
+        }
+        "mirror_map" => {
+            use strata_core::ops::build::{Side, Symmetry};
+            let symmetry = a
+                .choice("symmetry", &[("rotate_180", Symmetry::Rotate180), ("mirror_x", Symmetry::MirrorX), ("mirror_y", Symmetry::MirrorY)])?
+                .ok_or("\"symmetry\" is required: rotate_180, mirror_x or mirror_y")?;
+            let keep = a
+                .choice("keep", &[("west", Side::West), ("east", Side::East), ("south", Side::South), ("north", Side::North)])?
+                .ok_or("\"keep\" is required: west, east, south or north")?;
+            let players = match a.get("players") {
+                None => None,
+                Some(Value::Array(v)) => Some(
+                    v.iter()
+                        .map(|p| {
+                            let n: Vec<u8> = p.as_array().into_iter().flatten().filter_map(Value::as_u64).map(|x| x as u8).collect();
+                            <[u8; 2]>::try_from(n).map_err(|_| "players must be pairs like [[1, 2], [3, 4]]".to_owned())
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                ),
+                Some(_) => return Err("players must be pairs like [[1, 2], [3, 4]]".into()),
+            };
+            op(Op::Mirror {
+                symmetry,
+                keep,
+                players,
+                terrain: a.bool("terrain")?.unwrap_or(true),
+                objects: a.bool("objects")?.unwrap_or(true),
+            })
+        }
+        "make_ramp" => op(Op::Ramp {
+            from: a.point("from")?.ok_or("\"from\" is required: [x, y]")?,
+            to: a.point("to")?.ok_or("\"to\" is required: [x, y]")?,
+            width: a.f32("width")?.unwrap_or(4.0),
+        }),
+        "delete_camera" => op(Op::DeleteCamera {
+            name: a.need_str("name")?,
+        }),
+        "update_region" => op(Op::UpdateRegion {
+            name: a.need_str("name")?,
+            new_name: a.str("new_name")?,
+            shape: if ["rect", "circle", "polygon"].iter().any(|k| a.has(k)) { Some(region_shape(&a)?) } else { None },
+            color: a.color("color")?,
+            offset: a.point("offset")?,
+        }),
+        "delete_data" => op(Op::DeleteData {
+            class: a.need_str("class")?,
+            id: a.need_str("id")?,
+            force: a.bool("force")?.unwrap_or(false),
+        }),
+        "delete_data_field" => op(Op::DeleteDataField {
+            class: a.need_str("class")?,
+            id: a.need_str("id")?,
+            field: a.need_str("field")?,
+        }),
+        "delete_string" => op(Op::DeleteString {
+            key: a.need_str("key")?,
+            locale: a.str("locale")?,
+        }),
+        "set_trigger_enabled" => op(Op::SetTriggerEnabled {
+            name: a.need_str("name")?,
+            enabled: a.bool("enabled")?,
+            initially_on: a.bool("initially_on")?,
+        }),
+        "test_in_game" => Ok(render(s.test_in_game()?)),
         _ => Err(CallError::UnknownTool(name.to_owned())),
     }
 }
@@ -1120,6 +1366,53 @@ pub fn call(s: &Strata, name: &str, args: &Value) -> Result<String, CallError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn building_tools_and_map_picture() {
+        let s = Strata::headless_only(MapDocument::new("t", 64, 64));
+        let c = |n: &str, a: Value| call(&s, n, &a);
+        let placed: Value = serde_json::from_str(
+            &c("place_objects", json!({"objects": [
+                {"type_id": "CommandCenter", "x": 12.5, "y": 14.5, "facing": 90},
+                {"type_id": "MineralField", "x": 6, "y": 14, "player": 0},
+                {"kind": "point", "type_id": "StartLoc", "x": 12.5, "y": 14.5, "name": "Start Location 001"},
+            ]})).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(placed["result"]["ids"].as_array().unwrap().len(), 3);
+        assert!(c("place_objects", json!({"objects": [{"type_id": "Marine", "x": 1, "y": 1, "bogus": 2}]}))
+            .unwrap_err()
+            .eq(&CallError::Failed("objects[0]: unknown field \"bogus\"".into())));
+
+        let sc: Value = serde_json::from_str(
+            &c("scatter_objects", json!({"type_ids": ["CharRock01"], "rect": [30, 30, 50, 50], "count": 10, "min_spacing": 2, "seed": 3})).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(sc["result"]["placed"], 10);
+
+        let m: Value = serde_json::from_str(&c("mirror_map", json!({"symmetry": "rotate_180", "keep": "west"})).unwrap()).unwrap();
+        assert!(m["result"]["objects_copied"].as_u64().unwrap() >= 3, "{m}");
+
+        let path: Value = serde_json::from_str(&c("check_path", json!({"from": [12, 20], "to": [52, 44]})).unwrap()).unwrap();
+        assert_eq!(path["reachable"], true, "{path}");
+        let v: Value = serde_json::from_str(&c("validate_map", json!({})).unwrap()).unwrap();
+        assert!(!v.to_string().contains("walk between"), "{v}");
+
+        c("create_camera", json!({"name": "Intro", "x": 32, "y": 32})).unwrap();
+        c("delete_camera", json!({"name": "Intro"})).unwrap();
+        c("create_region", json!({"name": "Mid", "rect": [28, 28, 36, 36]})).unwrap();
+        c("update_region", json!({"name": "Mid", "new_name": "Center", "circle": [32, 32, 6]})).unwrap();
+        assert!(c("list_regions", json!({})).unwrap().contains("Center"));
+
+        let content = call_content(&s, "render_map", &json!({"width": 256})).unwrap();
+        assert_eq!(content[0]["type"], "image");
+        assert_eq!(content[0]["mimeType"], "image/png");
+        assert!(content[0]["data"].as_str().unwrap().starts_with("iVBORw0KGgo"));
+        assert!(content[1]["text"].as_str().unwrap().contains("start_locations"));
+        assert!(call_content(&s, "render_map", &json!({"rect": [100, 100, 120, 120]})).is_err());
+        // Plain call describes the picture without the bytes.
+        assert!(!c("render_map", json!({"width": 64})).unwrap().contains("png_base64"));
+    }
 
     #[test]
     fn every_def_has_a_handler_and_valid_schema() {

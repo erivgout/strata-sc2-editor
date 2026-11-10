@@ -92,6 +92,26 @@ pub enum Query {
     },
     /// The whole document as JSON (used by the server to save a live map).
     Document,
+    /// Whether ground units can walk from one point to another, and how.
+    CheckPath {
+        from: [f32; 2],
+        to: [f32; 2],
+    },
+    /// A schematic overhead PNG of the map (base64 in `png_base64`).
+    RenderMap {
+        #[serde(default)]
+        rect: Option<[f32; 4]>,
+        #[serde(default)]
+        width: Option<u32>,
+        #[serde(default)]
+        objects: Option<bool>,
+        #[serde(default)]
+        regions: Option<bool>,
+        #[serde(default)]
+        pathing: Option<bool>,
+        #[serde(default)]
+        grid: Option<u32>,
+    },
 }
 
 const DEFAULT_LIMIT: usize = 200;
@@ -222,6 +242,40 @@ impl Query {
                 }),
                 None => json!({"script": crate::galaxy::generate(doc)}),
             },
+            Query::CheckPath { from, to } => {
+                let grid = crate::walk::WalkGrid::new(doc);
+                match grid.route(*from, *to) {
+                    Ok(r) => json!({
+                        "reachable": true,
+                        "length": r.length,
+                        "straight_line": round(glam::Vec2::from(*from).distance(glam::Vec2::from(*to))),
+                        "waypoints": r.waypoints,
+                        "note": "terrain and pathing only; placed units and doodads are not obstacles",
+                    }),
+                    Err(crate::walk::NoRoute::Endpoint { which, why }) => json!({
+                        "reachable": false,
+                        "reason": format!("{which} point: {why}"),
+                    }),
+                    Err(crate::walk::NoRoute::Separated { reachable }) => json!({
+                        "reachable": false,
+                        "reason": "cliffs or unpathable ground separate the two points; add a ramp or clear pathing",
+                        "cells_reachable_from_start": reachable,
+                    }),
+                }
+            }
+            Query::RenderMap { rect, width, objects, regions, pathing, grid } => {
+                let o = crate::map_image::Options {
+                    rect: *rect,
+                    width: width.unwrap_or(768),
+                    objects: objects.unwrap_or(true),
+                    regions: regions.unwrap_or(true),
+                    pathing: pathing.unwrap_or(false),
+                    grid: grid.unwrap_or(16),
+                };
+                let (png, mut info) = crate::map_image::render_png(doc, &o).map_err(OpError::Invalid)?;
+                info["png_base64"] = json!(crate::png::base64(&png));
+                info
+            }
             Query::Validate => {
                 let problems = crate::validate::validate_with(doc, base);
                 let count = |s: Severity| problems.iter().filter(|p| p.severity == s).count();

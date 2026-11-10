@@ -197,6 +197,21 @@ impl Strata {
         })
     }
 
+    /// Start StarCraft II on the active target's map (unsaved edits included).
+    pub fn test_in_game(&self) -> Result<Outcome, String> {
+        let target = self.target();
+        let doc = match target {
+            Target::Editor => {
+                let out = self.run("test_in_game", LinkKind::Query(Query::Document))?;
+                serde_json::from_value(out.value).map_err(|e| format!("the editor sent a map this server cannot read: {e}"))?
+            }
+            Target::Headless => lock(&self.headless).doc.clone(),
+        };
+        let root = strata_core::base_data::default_install_dirs().into_iter().find(|d| d.is_dir());
+        let status = strata_format::playtest::launch(&doc, root.as_deref())?;
+        Ok(Outcome { target, value: json!({"status": status, "map": doc.info.name}) })
+    }
+
     /// Save the active target's map to `path` (or where it came from).
     pub fn save(&self, path: Option<PathBuf>) -> Result<Outcome, String> {
         let target = self.target();
