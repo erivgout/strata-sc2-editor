@@ -42,6 +42,9 @@ What works today:
   own model, portrait, icon and voice lines in one step, ready to place;
   **New sound** turns audio files into a sound for triggers or voices.
   Custom models draw in the 3D view from the map's own files.
+- Updates: when a new version is released, an **Update** button appears
+  next to **Test**; click it to download, check and install it, then
+  restart into it.
 - Real game data: on desktop Strata reads the base game's units, abilities,
   weapons and names straight from your StarCraft II install (in a browser,
   pick the install folder once). The Data editor shows inherited values,

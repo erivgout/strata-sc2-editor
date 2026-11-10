@@ -727,11 +727,11 @@ fn mode_hint(painter: &egui::Painter, rect: egui::Rect, state: &EditorState, tk:
             "Click to select · drag a box · drag to move",
         ),
         Mode::Units => (
-            "Click to place · Shift keeps placing · Shift+wheel or R rotates · Esc returns to Select",
-            "Click to place · Shift keeps placing",
+            "Click to place, again for more · Shift+wheel or R rotates · Esc returns to Select",
+            "Click to place · Esc returns to Select",
         ),
         Mode::Doodads => (
-            "Click to place a doodad · Shift keeps placing · R rotates · Esc returns to Select",
+            "Click to place doodads · R rotates · Esc returns to Select",
             "Click to place a doodad",
         ),
         Mode::Points => ("Click to place a point", "Click to place a point"),

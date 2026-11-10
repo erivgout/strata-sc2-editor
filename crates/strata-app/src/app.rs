@@ -338,7 +338,31 @@ pub struct StrataApp {
     /// The newer release offered to the user, if any.
     #[cfg(not(target_arch = "wasm32"))]
     update_offer: Option<crate::updater::Release>,
+    /// When the last automatic update check started (UI time, seconds).
+    #[cfg(not(target_arch = "wasm32"))]
+    last_update_check: f64,
+    /// Web: the service worker has a newer version waiting.
+    web_update_ready: bool,
 }
+
+/// What the title bar's Update button does right now. The desktop app
+/// installs releases itself; the web app reloads into its new version.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+enum UpdateButton {
+    /// A newer version can be installed.
+    Install { version: String },
+    /// Downloading and checking it.
+    Downloading { progress: f32 },
+    /// Installed; restart to switch to it.
+    Restart { version: String },
+    /// Web: reload to use the new version.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    Reload,
+}
+
+/// Look for a new release again after this long, for long sessions.
+#[cfg(not(target_arch = "wasm32"))]
+const UPDATE_RECHECK_SECONDS: f64 = 6.0 * 3600.0;
 
 impl StrataApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -368,6 +392,9 @@ impl StrataApp {
             updater: Default::default(),
             #[cfg(not(target_arch = "wasm32"))]
             update_offer: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            last_update_check: 0.0,
+            web_update_ready: false,
         };
         app.game_data.start(&cc.egui_ctx);
         #[cfg(not(target_arch = "wasm32"))]
@@ -687,6 +714,13 @@ impl StrataApp {
     #[cfg(not(target_arch = "wasm32"))]
     fn handle_updates(&mut self, ctx: &egui::Context) {
         use crate::updater::{Event, Status};
+        let now = ctx.input(|i| i.time);
+        if now - self.last_update_check > UPDATE_RECHECK_SECONDS && self.update_offer.is_none() {
+            self.last_update_check = now;
+            if now > 1.0 {
+                self.updater.check(ctx, false);
+            }
+        }
         while let Some(ev) = self.updater.poll() {
             match ev {
                 Event::Checked { result: Ok(Some(r)), manual } => {
@@ -958,7 +992,8 @@ impl StrataApp {
         }
         self.last_web_poll = now;
         self.can_install = crate::io::can_install();
-        if crate::io::update_ready() && !self.notices.iter().any(|n| n.key == "update") {
+        self.web_update_ready = crate::io::update_ready();
+        if self.web_update_ready && !self.notices.iter().any(|n| n.key == "update") {
             self.notice(Notice {
                 key: "update",
                 kind: ToastKind::Info,
@@ -1150,7 +1185,6 @@ impl StrataApp {
         let seg_w = workspace_switcher_width(ui);
         let gap = 8.0;
         let left = menus.right() + 16.0;
-        #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
         let mut right = bar.right() - 4.0;
         // Desktop: Test (play the map in StarCraft II) at the right end.
         #[cfg(not(target_arch = "wasm32"))]
@@ -1158,6 +1192,14 @@ impl StrataApp {
             let w = 72.0;
             if right - w - gap > left {
                 self.test_button(ui, Rect::from_min_size(Pos2::new(right - w, y - 12.0), Vec2::new(w, 24.0)), &t);
+                right -= w + gap;
+            }
+        }
+        // Update, just left of Test, while a new version is available.
+        if let Some(state) = self.update_button_state() {
+            let w = update_button_width(ui, &state);
+            if right - w - gap > left {
+                self.update_button(ui, Rect::from_min_size(Pos2::new(right - w, y - 12.0), Vec2::new(w, 24.0)), state, &t);
                 right -= w + gap;
             }
         }
@@ -1245,6 +1287,76 @@ impl StrataApp {
                 });
             if resp.clicked() {
                 self.queued.push(cmd);
+            }
+        }
+    }
+
+    fn update_button_state(&self) -> Option<UpdateButton> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use crate::updater::Status;
+            match &self.updater.status {
+                Status::Downloading { progress, .. } => return Some(UpdateButton::Downloading { progress: *progress }),
+                Status::Ready { version, .. } => return Some(UpdateButton::Restart { version: version.clone() }),
+                _ => {}
+            }
+            self.update_offer.as_ref().map(|r| UpdateButton::Install { version: r.version_text() })
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.web_update_ready.then_some(UpdateButton::Reload)
+        }
+    }
+
+    /// The Update button: shown while a newer Strata is available; installs
+    /// it, shows progress, then restarts into it.
+    fn update_button(&mut self, ui: &mut egui::Ui, rect: Rect, state: UpdateButton, t: &Tokens) {
+        let busy = matches!(state, UpdateButton::Downloading { .. });
+        let sense = if busy { egui::Sense::hover() } else { egui::Sense::click() };
+        let resp = ui.interact(rect, ui.id().with("update-app"), sense);
+        let p = ui.painter();
+        let hot = resp.hovered() && !busy;
+        p.rect_filled(rect, 6.0, if hot { t.ok.gamma_multiply(0.30) } else { t.ok.gamma_multiply(0.16) });
+        p.rect_stroke(rect, 6.0, Stroke::new(1.0, t.ok), egui::StrokeKind::Inside);
+        if let UpdateButton::Downloading { progress } = state {
+            let mut bar = rect.shrink(1.0);
+            bar.set_width(bar.width() * progress.clamp(0.0, 1.0));
+            p.rect_filled(bar, 5.0, t.ok.gamma_multiply(0.35));
+        }
+        if resp.has_focus() {
+            p.rect_stroke(rect, 6.0, Stroke::new(1.5, t.text), egui::StrokeKind::Outside);
+        }
+        let ink = t.text;
+        let label = p.layout_no_wrap(update_button_label(&state), egui::FontId::new(14.0, theme::medium()), ink);
+        // A small down arrow ("download") before the label.
+        let a = 9.0;
+        let content = a + 6.0 + label.size().x;
+        let x = rect.center().x - content / 2.0;
+        let cy = rect.center().y;
+        let stroke = Stroke::new(1.6, t.ok);
+        p.line_segment([Pos2::new(x + a / 2.0, cy - a / 2.0 - 1.0), Pos2::new(x + a / 2.0, cy + a / 2.0)], stroke);
+        p.line_segment([Pos2::new(x, cy + 0.5), Pos2::new(x + a / 2.0, cy + a / 2.0)], stroke);
+        p.line_segment([Pos2::new(x + a, cy + 0.5), Pos2::new(x + a / 2.0, cy + a / 2.0)], stroke);
+        p.galley(Pos2::new(x + a + 6.0, cy - label.size().y / 2.0), label, ink);
+        let tip = match &state {
+            UpdateButton::Install { version } => format!(
+                "Strata {version} is available (you have {}). Click to download, check and install it; your map stays open.",
+                env!("CARGO_PKG_VERSION")
+            ),
+            UpdateButton::Downloading { .. } => "Downloading the update. You can keep working.".to_owned(),
+            UpdateButton::Restart { version } => format!(
+                "Strata {version} is installed. Click to restart into it (save your map first); it also finishes when you quit."
+            ),
+            UpdateButton::Reload => "A new version of Strata is ready. Click to reload; save your map first.".to_owned(),
+        };
+        let resp = resp.on_hover_cursor(if busy { egui::CursorIcon::Default } else { egui::CursorIcon::PointingHand }).on_hover_text(tip);
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, !busy, "Update Strata"));
+        if resp.clicked() {
+            match state {
+                UpdateButton::Install { .. } => self.queued.push(Command::InstallUpdate),
+                UpdateButton::Restart { .. } => self.queued.push(Command::RestartToUpdate),
+                UpdateButton::Reload => crate::io::reload_for_update(),
+                UpdateButton::Downloading { .. } => {}
             }
         }
     }
@@ -2084,6 +2196,24 @@ fn reveal_tab(dock: &mut DockState<Tab>, tab: Tab) {
 }
 
 /// Width of the workspace switcher: equal segments sized to the longest label.
+fn update_button_label(state: &UpdateButton) -> String {
+    match state {
+        UpdateButton::Install { .. } | UpdateButton::Reload => "Update".to_owned(),
+        UpdateButton::Downloading { progress } => format!("Updating {}%", (progress * 100.0).round() as u32),
+        UpdateButton::Restart { .. } => "Restart to update".to_owned(),
+    }
+}
+
+fn update_button_width(ui: &egui::Ui, state: &UpdateButton) -> f32 {
+    // Room for the widest progress text so the button doesn't jitter.
+    let text = match state {
+        UpdateButton::Downloading { .. } => "Updating 100%".to_owned(),
+        s => update_button_label(s),
+    };
+    let w = ui.painter().layout_no_wrap(text, egui::FontId::new(14.0, theme::medium()), Color32::WHITE).size().x;
+    (w + 9.0 + 6.0 + 24.0).ceil()
+}
+
 fn workspace_switcher_width(ui: &egui::Ui) -> f32 {
     let font = egui::FontId::new(14.0, theme::medium());
     let widest = Workspace::ALL
