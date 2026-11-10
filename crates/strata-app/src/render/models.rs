@@ -69,6 +69,40 @@ pub struct ModelStats {
     pub prepare_ms: f32,
 }
 
+/// Which placed objects a map image export draws, and how far loading them
+/// has got. Owned by the export; [`ModelRenderer::prepare`] fills the counts
+/// and hands the draw list to the GPU pass each frame while it is set.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CaptureModels {
+    /// World rect [x0, y0, x1, y1].
+    pub area: [f32; 4],
+    pub units: bool,
+    pub doodads: bool,
+    /// Objects in the area drawn as a model.
+    pub drawn: usize,
+    /// Objects whose model or textures are still loading.
+    pub loading: usize,
+    /// Objects without a model (not in the data, file not found).
+    pub missing: usize,
+}
+
+impl CaptureModels {
+    /// Whether the export draws an object of this kind at this position.
+    pub fn wants(&self, kind: ObjectKind, x: f32, y: f32, margin: f32) -> bool {
+        let on = match kind {
+            ObjectKind::Unit => self.units,
+            ObjectKind::Doodad => self.doodads,
+            ObjectKind::Point => false,
+        };
+        let [x0, y0, x1, y1] = self.area;
+        on && x >= x0 - margin && x <= x1 + margin && y >= y0 - margin && y <= y1 + margin
+    }
+}
+
+/// Models drawn in one export at most (the viewport's per-frame budget does
+/// not apply: an export waits for everything in its area).
+const MAX_CAPTURE_INSTANCES: usize = 100_000;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct TypeKey {
     unit: bool,
@@ -309,13 +343,22 @@ impl ModelRenderer {
             pass.mesh_uploads.clear();
             pass.texture_uploads.clear();
             pass.frame = FrameDraws::default();
+            pass.capture_frame = FrameDraws::default();
             pass.release_all = true;
         }
     }
 
     /// Resolve, load and lay out this frame's models, and hand the draws to
-    /// the GPU pass in `shared`.
-    pub fn prepare(&mut self, ctx: &egui::Context, state: &EditorState, view: &View, shared: &SharedHandle) {
+    /// the GPU pass in `shared`. With `capture`, also load and lay out every
+    /// model a map image export needs (see [`CaptureModels`]).
+    pub fn prepare(
+        &mut self,
+        ctx: &egui::Context,
+        state: &EditorState,
+        view: &View,
+        shared: &SharedHandle,
+        capture: Option<&mut CaptureModels>,
+    ) {
         let t0 = web_time_now();
         self.drawn.clear();
         let assets = state.assets.clone();
@@ -330,6 +373,11 @@ impl ModelRenderer {
             self.stats = ModelStats::default();
             if let Ok(mut s) = shared.lock() {
                 s.models.frame.clear();
+                s.models.capture_frame.clear();
+            }
+            if let Some(c) = capture {
+                let n = state.doc.objects.objects.iter().filter(|o| c.wants(o.kind, o.position.x, o.position.y, 0.0)).count();
+                (c.drawn, c.loading, c.missing) = (0, 0, n);
             }
             return;
         }
@@ -424,10 +472,83 @@ impl ModelRenderer {
 
         // Instances.
         let sel: HashSet<ObjectId> = state.selection.objects.iter().copied().collect();
+        let objects: Vec<(usize, &PlacedObject)> = wants.iter().map(|w| (w.0, w.1)).collect();
+        let mut drawn = std::mem::take(&mut self.drawn);
+        let frame = self.build_draws(state, &objects, &sel, Some(&mut drawn));
+        self.drawn = drawn;
+
+        // A map image export: everything in its area, however small or far.
+        let capture_frame = match capture {
+            Some(c) => {
+                let (f, b) = self.prepare_capture(state, c, &assets, now, &mut tex_uploads);
+                busy |= b;
+                Some(f)
+            }
+            None => None,
+        };
+
+        // Hand over. Keep frames coming while uploads are queued (the pass
+        // spreads them over several frames).
+        if let Ok(mut s) = shared.lock() {
+            let pass = &mut s.models;
+            pass.mesh_uploads.append(&mut self.pending);
+            pass.texture_uploads.extend(tex_uploads);
+            pass.frame = frame;
+            pass.capture_frame = capture_frame.unwrap_or_default();
+            busy |= !pass.mesh_uploads.is_empty()
+                || !pass.texture_uploads.is_empty()
+                || pass.release_all
+                || !pass.retired_meshes.is_empty()
+                || !pass.retired_textures.is_empty();
+        }
+
+        self.stats = ModelStats {
+            types: self.types.len(),
+            types_ready: self
+                .types
+                .values()
+                .filter(
+                    |t| matches!(t, TypeState::Model(i) if matches!(self.models[*i].state, ModelState::Ready { .. })),
+                )
+                .count(),
+            types_missing: self.types.values().filter(|t| matches!(t, TypeState::Missing)).count(),
+            instances: kept,
+            triangles: tris,
+            prepare_ms: ((web_time_now() - t0) * 1000.0) as f32,
+        };
+        let summary = (self.stats.types_ready, self.stats.instances);
+        if now - self.logged_at > 5.0 || (summary != self.logged && !busy) {
+            self.logged_at = now;
+            self.logged = summary;
+            let s = &self.stats;
+            log::debug!(
+                "models: {} types ({} ready, {} without a model), {} instances, {} triangles, prepared in {:.2} ms",
+                s.types,
+                s.types_ready,
+                s.types_missing,
+                s.instances,
+                s.triangles,
+                s.prepare_ms
+            );
+        }
+        if busy || matches!(self.supplement.state, SupplementState::Fetching { .. }) || self.supplement_building() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(60));
+        }
+    }
+
+    /// Instanced draws for `objects` (model index, object), grouped per model
+    /// and submesh. `marks` receives each object's footprint for the overlay.
+    fn build_draws(
+        &self,
+        state: &EditorState,
+        objects: &[(usize, &PlacedObject)],
+        selected: &HashSet<ObjectId>,
+        mut marks: Option<&mut HashMap<ObjectId, ModelMark>>,
+    ) -> FrameDraws {
         let accent = crate::render::overlay::MAP.accent;
         let accent = [accent.r() as f32 / 255.0, accent.g() as f32 / 255.0, accent.b() as f32 / 255.0];
         let mut per_model: HashMap<usize, Vec<f32>> = HashMap::new();
-        for (mi, o, _) in &wants {
+        for (mi, o) in objects {
             let entry = &self.models[*mi];
             let ModelState::Ready { bounds, .. } = &entry.state else { continue };
             let (m, s) = object_matrix(state, o, &entry.model);
@@ -440,7 +561,7 @@ impl ModelRenderer {
                 Some(c) => [c[0], c[1], c[2], 1.0],
                 None => [0.0; 4],
             };
-            let extra = if sel.contains(&o.id) { [accent[0], accent[1], accent[2], 0.45] } else { [0.0; 4] };
+            let extra = if selected.contains(&o.id) { [accent[0], accent[1], accent[2], 0.45] } else { [0.0; 4] };
             let v = per_model.entry(*mi).or_default();
             v.extend_from_slice(&m.to_cols_array());
             v.extend_from_slice(&team);
@@ -448,7 +569,9 @@ impl ModelRenderer {
             let base = object_base(state, o);
             let half = Vec3::from(bounds.max) - Vec3::from(bounds.min);
             let radius = (half.x.max(half.y) * 0.5 * s.x.max(s.y)).max(0.3);
-            self.drawn.insert(o.id, ModelMark { anchor: base, radius });
+            if let Some(m) = marks.as_deref_mut() {
+                m.insert(o.id, ModelMark { anchor: base, radius });
+            }
         }
 
         let mut frame = FrameDraws::default();
@@ -495,53 +618,74 @@ impl ModelRenderer {
             }
         }
         frame.batches.sort_by_key(|b| (!b.blend.is_opaque(), b.mesh, b.diffuse));
+        frame
+    }
 
-        // Hand over. Keep frames coming while uploads are queued (the pass
-        // spreads them over several frames).
-        if let Ok(mut s) = shared.lock() {
-            let pass = &mut s.models;
-            pass.mesh_uploads.append(&mut self.pending);
-            pass.texture_uploads.extend(tex_uploads);
-            pass.frame = frame;
-            busy |= !pass.mesh_uploads.is_empty()
-                || !pass.texture_uploads.is_empty()
-                || pass.release_all
-                || !pass.retired_meshes.is_empty()
-                || !pass.retired_textures.is_empty();
+    /// Resolve and load every model an export draws, and lay them out.
+    /// Returns the draws and whether loading is still under way.
+    fn prepare_capture(
+        &mut self,
+        state: &EditorState,
+        c: &mut CaptureModels,
+        assets: &Assets,
+        now: f64,
+        tex_uploads: &mut Vec<TextureUpload>,
+    ) -> (FrameDraws, bool) {
+        let extra = self.supplement_catalog();
+        let mut lookup: Option<ModelLookup> = None;
+        let mut picked: Vec<(usize, &PlacedObject)> = Vec::new();
+        let (mut loading, mut missing) = (0usize, 0usize);
+        let mut busy = false;
+        // Its own parse budget: an export waits for everything it draws.
+        let mut budget = PARSES_PER_FRAME * 2;
+        for o in &state.doc.objects.objects {
+            if o.type_id.is_empty() || !c.wants(o.kind, o.position.x, o.position.y, 8.0) {
+                continue;
+            }
+            let variation =
+                o.extra.iter().find(|(k, _)| k == "Variation").and_then(|(_, v)| v.trim().parse().ok()).unwrap_or(0u32);
+            let key = TypeKey { unit: o.kind == ObjectKind::Unit, id: o.type_id.clone(), variation };
+            if !self.types.contains_key(&key) {
+                let l = lookup.get_or_insert_with(|| {
+                    let ex: Vec<&BaseCatalog> = extra.iter().map(|c| c.as_ref()).collect();
+                    ModelLookup::new(Some(&state.doc.data), &ex, state.base.as_deref())
+                });
+                let r = if key.unit { l.unit_model(&key.id) } else { l.doodad_model(&key.id) };
+                let st = match r {
+                    Ok(m) => TypeState::Model(self.model_index(m, variation)),
+                    Err(_) => TypeState::Missing,
+                };
+                self.types.insert(key.clone(), st);
+            }
+            let Some(TypeState::Model(mi)) = self.types.get(&key) else {
+                missing += 1;
+                continue;
+            };
+            let mi = *mi;
+            if !matches!(self.models[mi].state, ModelState::Ready { .. }) {
+                busy |= self.advance_model(mi, assets, now, &mut budget);
+            }
+            match &self.models[mi].state {
+                ModelState::Ready { triangles: 0, .. } | ModelState::Failed { .. } => missing += 1,
+                ModelState::Ready { .. } => {
+                    if self.advance_textures(mi, assets, tex_uploads) {
+                        busy = true;
+                        loading += 1;
+                    }
+                    if picked.len() < MAX_CAPTURE_INSTANCES {
+                        picked.push((mi, o));
+                    }
+                }
+                _ => {
+                    busy = true;
+                    loading += 1;
+                }
+            }
         }
-
-        self.stats = ModelStats {
-            types: self.types.len(),
-            types_ready: self
-                .types
-                .values()
-                .filter(
-                    |t| matches!(t, TypeState::Model(i) if matches!(self.models[*i].state, ModelState::Ready { .. })),
-                )
-                .count(),
-            types_missing: self.types.values().filter(|t| matches!(t, TypeState::Missing)).count(),
-            instances: kept,
-            triangles: tris,
-            prepare_ms: ((web_time_now() - t0) * 1000.0) as f32,
-        };
-        let summary = (self.stats.types_ready, self.stats.instances);
-        if now - self.logged_at > 5.0 || (summary != self.logged && !busy) {
-            self.logged_at = now;
-            self.logged = summary;
-            let s = &self.stats;
-            log::debug!(
-                "models: {} types ({} ready, {} without a model), {} instances, {} triangles, prepared in {:.2} ms",
-                s.types,
-                s.types_ready,
-                s.types_missing,
-                s.instances,
-                s.triangles,
-                s.prepare_ms
-            );
-        }
-        if busy || matches!(self.supplement.state, SupplementState::Fetching { .. }) || self.supplement_building() {
-            ctx.request_repaint_after(std::time::Duration::from_millis(60));
-        }
+        let drawn = picked.len();
+        let frame = self.build_draws(state, &picked, &HashSet::new(), None);
+        (c.drawn, c.loading, c.missing) = (drawn, loading, missing);
+        (frame, busy)
     }
 
     // -- type resolution ------------------------------------------------------
@@ -1110,12 +1254,21 @@ pub struct ModelPass {
     mesh_uploads: Vec<MeshUpload>,
     texture_uploads: Vec<TextureUpload>,
     frame: FrameDraws,
+    /// Draws of a map image export in progress (see [`CaptureModels`]).
+    capture_frame: FrameDraws,
     /// Retire every mesh and texture at the next paint (a new map was opened).
     release_all: bool,
     /// Retired GPU objects, freed a few per paint so a big map change never
     /// stalls a frame.
     retired_meshes: Vec<GpuMesh>,
     retired_textures: Vec<glow::Texture>,
+}
+
+impl ModelPass {
+    /// Whether meshes or textures are still waiting to reach the GPU.
+    pub fn uploads_pending(&self) -> bool {
+        !self.mesh_uploads.is_empty() || !self.texture_uploads.is_empty()
+    }
 }
 
 /// GPU objects deleted per paint at most.
@@ -1372,12 +1525,12 @@ impl ModelPass {
         }
     }
 
-    /// Draw this frame's models into the currently bound (depth-tested)
-    /// target. Leaves the terrain pass's GL state as it found it.
+    /// Draw this frame's models (or, with `capture`, the export's) into the
+    /// currently bound (depth-tested) target. Leaves the terrain pass's GL state as it found it.
     ///
     /// # Safety
     /// Must run on the GL thread inside the paint callback.
-    pub unsafe fn paint(&mut self, gl: &glow::Context, p: &FrameParams) {
+    pub unsafe fn paint(&mut self, gl: &glow::Context, p: &FrameParams, capture: bool) {
         unsafe {
             if self.failed {
                 return;
@@ -1390,13 +1543,14 @@ impl ModelPass {
                 }
             }
             self.upload(gl);
-            if self.frame.batches.is_empty() {
+            let frame = if capture { &self.capture_frame } else { &self.frame };
+            if frame.batches.is_empty() {
                 return;
             }
             let Some(pr) = self.programs.as_mut() else { return };
 
             // Instance data for the whole frame.
-            let bytes: &[u8] = bytemuck::cast_slice(&self.frame.instances);
+            let bytes: &[u8] = bytemuck::cast_slice(&frame.instances);
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(pr.instance_vbo));
             if bytes.len() > pr.instance_bytes {
                 let size = bytes.len().next_power_of_two();
@@ -1410,8 +1564,7 @@ impl ModelPass {
             let sun = super::gl::SUN;
             gl.uniform_3_f32(pr.u_sun.as_ref(), sun.x, sun.y, sun.z);
             gl.uniform_3_f32(pr.u_eye.as_ref(), p.eye.x, p.eye.y, p.eye.z);
-            let fog_start = p.map_size[0].max(p.map_size[1]) * 1.2;
-            gl.uniform_4_f32(pr.u_fog.as_ref(), p.clear[0], p.clear[1], p.clear[2], fog_start);
+            gl.uniform_4_f32(pr.u_fog.as_ref(), p.clear[0], p.clear[1], p.clear[2], p.fog_start);
             gl.uniform_1_i32(pr.u_diffuse.as_ref(), 0);
             gl.uniform_1_i32(pr.u_emissive.as_ref(), 1);
             gl.uniform_1_i32(pr.u_alpha.as_ref(), 2);
@@ -1420,7 +1573,7 @@ impl ModelPass {
             let stride = (INSTANCE_FLOATS * 4) as i32;
             let mut bound_mesh = None;
             let mut blending = false;
-            for b in &self.frame.batches {
+            for b in &frame.batches {
                 let Some(mesh) = self.meshes.get(&b.mesh) else { continue };
                 if bound_mesh != Some(b.mesh) {
                     gl.bind_vertex_array(Some(mesh.vao));

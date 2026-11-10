@@ -42,6 +42,8 @@ pub struct ViewportState {
     framed_for: Option<(u32, u32, Option<String>)>,
     sync_timer: f32,
     height_range: Option<(u64, (f32, f32))>,
+    /// A map image export in progress (see [`crate::export_image`]).
+    pub export: Option<crate::export_image::ExportJob>,
 }
 
 impl Default for ViewportState {
@@ -65,6 +67,7 @@ impl Default for ViewportState {
             framed_for: None,
             sync_timer: 0.0,
             height_range: None,
+            export: None,
         }
     }
 }
@@ -183,7 +186,16 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState) {
         models.reset(&state.ui.viewport.renderer.shared);
         models.generation = Some(state.doc_generation);
     }
-    models.prepare(&ctx, state, &view, &state.ui.viewport.renderer.shared);
+    let mut export = state.ui.viewport.export.take();
+    if export.as_ref().is_some_and(|j| j.generation != state.doc_generation) {
+        // Another map was opened: this export no longer applies.
+        crate::export_image::ExportJob::cancel(&state.ui.viewport.renderer.shared);
+        if let Some(j) = export.as_mut() {
+            j.result = Some(Err("Another map was opened, so the map image export stopped.".into()));
+        }
+    }
+    let capture = export.as_mut().filter(|j| j.result.is_none()).map(|j| &mut j.capture);
+    models.prepare(&ctx, state, &view, &state.ui.viewport.renderer.shared, capture);
     state.ui.viewport.models = models;
 
     // Terrain.
@@ -210,12 +222,19 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState) {
         water_color: [0.16, 0.36, 0.52, 1.0],
         layers,
         tex_scale: crate::render::textures::REPEATS_PER_CELL,
+        fog_start: t.width.max(t.height) as f32 * 1.2,
     };
+    if let Some(job) = export.as_mut() {
+        let p = crate::export_image::frame_params(&params, job.rect, range);
+        job.drive(ctx.input(|i| i.time), &vs.renderer.shared, p);
+        ctx.request_repaint();
+    }
     painter.add(gl::callback(vs.renderer.shared.clone(), rect, params));
     if let Some(err) = vs.renderer.error() {
         painter.rect_filled(rect, 0.0, tk.bg_deep);
         painter.text(rect.center(), egui::Align2::CENTER_CENTER, err, egui::FontId::proportional(14.0), tk.error);
     }
+    state.ui.viewport.export = export;
 
     // Overlays.
     let hovered_obj: Option<ObjectId> = if state.mode == Mode::Select && !busy {

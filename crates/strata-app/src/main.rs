@@ -5,6 +5,7 @@ mod assets;
 #[cfg(not(target_arch = "wasm32"))]
 mod audio;
 mod commands;
+mod export_image;
 mod game_data;
 #[cfg(windows)]
 mod install;
